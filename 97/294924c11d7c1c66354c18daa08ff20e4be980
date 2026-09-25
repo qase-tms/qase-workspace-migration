@@ -1,0 +1,145 @@
+.github/CODEOWNERS
+  s_de7f4254fee51f::t_8f62ce7d0d4bc2 1-4
+.gitignore
+  s_de7f4254fee51f::t_caef2cce3f12d1 1-56
+CHANGELOG.md
+  s_de7f4254fee51f::t_099d42a237ff15 1-73
+LICENSE
+  s_de7f4254fee51f::t_4b4f5a37d7c87d 1-201
+README.md
+  s_de7f4254fee51f::t_3d2151e08b30ca 1-442
+SECURITY.md
+  s_de7f4254fee51f::t_36c518157872cc 1-51
+VERSION
+  s_de7f4254fee51f::t_090699d1e39926 1
+config.example.json
+  s_de7f4254fee51f::t_6c76c7afac0ab1 1-66
+migration/__init__.py
+  s_de7f4254fee51f::t_d80175e3931382 1-3
+migration/config.py
+  s_de7f4254fee51f::t_c5531c95721f4d 1-164
+migration/create/__init__.py
+  s_de7f4254fee51f::t_eef26c1070567c 1-38
+migration/create/attachments.py
+  s_de7f4254fee51f::t_b0223c74e83504 1-824
+migration/create/cases.py
+  s_de7f4254fee51f::t_ae382537435cf6 1-438
+migration/create/configurations.py
+  s_de7f4254fee51f::t_c45fd78254fdee 1-143
+migration/create/custom_fields.py
+  s_de7f4254fee51f::t_8c6971d62a078e 1-282
+migration/create/defects.py
+  s_de7f4254fee51f::t_ce36fa7d973469 1-228
+migration/create/environments.py
+  s_de7f4254fee51f::t_6bb31916694e4e 1-98
+migration/create/groups.py
+  s_de7f4254fee51f::t_46c855d0e1cdf8 1-144
+migration/create/milestones.py
+  s_de7f4254fee51f::t_86451e0b46af14 1-159
+migration/create/plans.py
+  s_de7f4254fee51f::t_3ca6b63edc8eeb 1-113
+migration/create/projects.py
+  s_de7f4254fee51f::t_8d4d1c3f9d1af0 1-180
+migration/create/results.py
+  s_de7f4254fee51f::t_db8e0b2ea89946 1-1949
+migration/create/runs.py
+  s_de7f4254fee51f::t_ac7be131a167f0 1-475
+migration/create/shared_parameters.py
+  s_de7f4254fee51f::t_87b4b4be213051 1-195
+migration/create/shared_steps.py
+  s_de7f4254fee51f::t_fd3785108be4a8 1-89
+migration/create/suites.py
+  s_de7f4254fee51f::t_2506654136fb00 1-132
+migration/create/users.py
+  s_de7f4254fee51f::t_1b5fab7c60128e 1-419
+migration/dry_run.py
+  s_de7f4254fee51f::t_a1a3a8bd6472f3 1-193
+migration/extract/__init__.py
+  s_de7f4254fee51f::t_213ac4c2831a65 1-24
+migration/extract/attachments.py
+  s_de7f4254fee51f::t_92fb7eb07499ba 1-436
+migration/extract/authors.py
+  s_de7f4254fee51f::t_7e55d9045e389c 1-100
+migration/extract/cases.py
+  s_de7f4254fee51f::t_127591d0263d29 1-73
+migration/extract/configurations.py
+  s_de7f4254fee51f::t_c0feb1d0e860a6 1-48
+migration/extract/custom_fields.py
+  s_de7f4254fee51f::t_76e93e4cbf71c7 1-46
+migration/extract/defects.py
+  s_de7f4254fee51f::t_c77ac9cf7401fc 1-93
+migration/extract/environments.py
+  s_de7f4254fee51f::t_8e41f54992e047 1-54
+migration/extract/groups.py
+  s_de7f4254fee51f::t_70b6a00ed0a6f0 1-56
+migration/extract/milestones.py
+  s_de7f4254fee51f::t_f173e6c395beca 1-57
+migration/extract/plans.py
+  s_de7f4254fee51f::t_0f208efda396fe 1-72
+migration/extract/projects.py
+  s_de7f4254fee51f::t_a035b7180fb57c 1-78
+migration/extract/results.py
+  s_de7f4254fee51f::t_81371e0fd5e047 1-163
+migration/extract/runs.py
+  s_de7f4254fee51f::t_3da651e7bd144d 1-241
+migration/extract/shared_parameters.py
+  s_de7f4254fee51f::t_1391f25a82658b 1-73
+migration/extract/shared_steps.py
+  s_de7f4254fee51f::t_eacf437283fba9 1-60
+migration/extract/suites.py
+  s_de7f4254fee51f::t_53cd4917400813 1-65
+migration/extract/users.py
+  s_de7f4254fee51f::t_2665be91845d6a 1-48
+migration/progress.py
+  s_de7f4254fee51f::t_b2c4d364f50eba 1-303
+migration/qase_http.py
+  s_de7f4254fee51f::t_279bf2b4b51541 1-64
+migration/qase_rate_limit.py
+  s_de7f4254fee51f::t_68c9e4d7939624 1-56
+migration/run_report.py
+  s_de7f4254fee51f::t_31c2fe2fe0e830 1-361
+migration/run_single_project.py
+  s_de7f4254fee51f::t_755463d7f85c0d 1-355
+migration/step_logging.py
+  s_de7f4254fee51f::t_70c333789b0ff8 1-66
+migration/trace_log.py
+  s_de7f4254fee51f::t_f7a3cf6fb28708 1-194
+migration/transform/__init__.py
+  s_de7f4254fee51f::t_95c96e81dc37bc 1-3
+migration/transform/attachments.py
+  s_de7f4254fee51f::t_eee724522721cf 1-228
+migration/utils.py
+  s_de7f4254fee51f::t_1701b2f78e465d 1-956
+migration/utils/__init__.py
+  s_de7f4254fee51f::t_8bf8ab2d82f22e 1-64
+migration/utils/scim_client.py
+  s_de7f4254fee51f::t_9b3445e68f93d6 1-319
+preflight.py
+  s_de7f4254fee51f::t_60550be4ae8fa5 1-234
+qase_service.py
+  s_de7f4254fee51f::t_e1142bf9f66547 1-73
+requirements-dev.txt
+  s_de7f4254fee51f::t_8ca0992ae25433 1-5
+requirements.txt
+  s_de7f4254fee51f::t_b0b963a5d72de3 1-7
+start.py
+  s_de7f4254fee51f::t_d4d6a8941d8979 1-593
+tests/test_standard.py
+  s_de7f4254fee51f::t_5c692761e2e0d7 1-466
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "97294924c11d7c1c66354c18daa08ff20e4be980",
+  "prompts": {},
+  "sessions": {
+    "s_de7f4254fee51f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5afad392-479e-449d-bdab-a84638cf85ec",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "rmontemor-qase <rmontemor@qase.io>"
+    }
+  }
+}
