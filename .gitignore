@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Migration files
+mappings.json
+migration.log
+*.log
+
+# Per-run logs, reports and statistics (contain source/target project data)
+logs/
+stats/
+cache/
+
+# Migration debug traces (JSONL), never commit
+migration_trace.jsonl
+*_trace.jsonl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config files with secrets (config.example.json is the tracked template)
+config.json
+secrets.json

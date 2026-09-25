@@ -1,0 +1,7 @@
+qase-api-client>=2.0.1
+qase-api-v2-client>=2.0.0
+requests
+urllib3>=2.2.3
+certifi
+tqdm>=4.66.0
+openpyxl

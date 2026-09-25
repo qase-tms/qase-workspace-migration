@@ -1,0 +1,5 @@
+# Test-only dependencies. The migration itself needs nothing from this file.
+#
+#   pip install -r requirements-dev.txt
+#   python -m pytest tests/ -q
+pytest>=8.0

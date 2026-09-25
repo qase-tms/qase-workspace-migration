@@ -1,0 +1,66 @@
+{
+  "source": {
+    "api_token": "<SOURCE_QASE_API_TOKEN>",
+    "host": "qase.io",
+    "ssl": true,
+    "scim_token": "",
+    "scim_host": ""
+  },
+
+  "target": {
+    "api_token": "<TARGET_QASE_API_TOKEN>",
+    "host": "qase.io",
+    "ssl": true,
+    "scim_token": "",
+    "scim_host": ""
+  },
+
+  "projects": {
+    "import_all": false,
+    "import": ["<PROJECT_CODE>"],
+    "exclude": []
+  },
+
+  "users": {
+    "default": "someone@company.com",
+    "migrate": false,
+    "create": false,
+    "only_active": true,
+    "skip_creation_confirm": false
+  },
+
+  "groups": {
+    "create": false
+  },
+
+  "cases": {
+    "preserve_ids": true
+  },
+
+  "runs": {
+    "link_to_plan": false
+  },
+
+  "migration": {
+    "allow_existing_target": false
+  },
+
+  "options": {
+    "mappings_file": "mappings.json",
+    "resume": false,
+    "skip_attachments": false,
+    "parallel_project_migration": true,
+    "max_parallel_projects": 4,
+    "show_project_progress": true,
+    "migration_trace_file": "migration_trace.jsonl",
+    "migration_trace_full_payloads": false
+  },
+
+  "logging": {
+    "level": "info",
+    "write_to_file": true,
+    "dir": "./logs"
+  },
+
+  "prefix": ""
+}
