@@ -69,6 +69,31 @@ def _list_projects(block: dict) -> list:
         offset += 100
 
 
+def _list_users(block: dict) -> list:
+    """
+    Every user in a workspace, through the public authors endpoint.
+
+    This is what the migration itself uses to match users by email when there
+    are no SCIM tokens, so preflight reports the same view the run will see.
+    """
+    url = f"{api_base_url(block)}/v1/author"
+    headers = {"Token": str(block.get("api_token"))}
+    out, offset = [], 0
+    while True:
+        resp = requests.get(
+            url, headers=headers,
+            params={"limit": 100, "offset": offset, "type": "user"},
+            timeout=(15, 60),
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        entities = ((resp.json() or {}).get("result") or {}).get("entities") or []
+        out.extend(entities)
+        if len(entities) < 100:
+            return out
+        offset += 100
+
+
 def _scim_ok(block: dict) -> tuple:
     from qase_service import QaseService
 
@@ -189,10 +214,52 @@ def main():
 
     users = config.get("users") or {}
     if users.get("migrate"):
-        print("\n- SCIM (users.migrate is true) -")
+        creating = bool(users.get("create"))
+        print("\n- Users (users.migrate is true) -")
+
+        if not creating:
+            # No creation, so no SCIM needed: users are matched by email.
+            # Report the match rate, since that decides whose name ends up on
+            # the migrated history.
+            try:
+                source_users = _list_users(source)
+                target_emails = {
+                    str(u.get("email") or "").lower()
+                    for u in _list_users(target)
+                    if u.get("email")
+                }
+            except (RuntimeError, requests.exceptions.RequestException) as e:
+                _report("User matching", False, str(e)[:200])
+                source_users, target_emails = [], set()
+
+            if source_users:
+                with_email = [u for u in source_users if u.get("email")]
+                matched = [
+                    u for u in with_email
+                    if str(u.get("email")).lower() in target_emails
+                ]
+                unmatched = len(with_email) - len(matched)
+                _report(
+                    "User matching by email",
+                    True,
+                    f"{len(matched)} of {len(with_email)} source users exist in the target",
+                )
+                if unmatched:
+                    _warn(
+                        f"{unmatched} source user(s) not in the target",
+                        "their cases, runs and results will be attributed to users.default. "
+                        "Create them in the target with the same email addresses first to "
+                        "keep the original authorship",
+                    )
+
         for block_name, block in (("source", source), ("target", target)):
             if not str(block.get("scim_token") or "").strip():
-                _report(f"{block_name}.scim_token", False, "required when users.migrate is true")
+                if creating:
+                    _report(
+                        f"{block_name}.scim_token", False,
+                        "required when users.create is true (SCIM is an Enterprise feature). "
+                        "Set users.create to false to match existing target users by email",
+                    )
                 continue
             try:
                 ok, detail, body = _scim_ok(block)
@@ -206,7 +273,8 @@ def main():
                 _warn(
                     "Source users",
                     f"{active} active, {len(people) - active} inactive in the first {len(people)} of {total}. "
-                    + ("users.only_active is false, so inactive users are created too and consume seats"
+                    + ("users.only_active is false, so inactive users are created too, "
+                       "as deactivated users in the target"
                        if users.get("only_active") is False else "inactive users are not created"),
                 )
         if users.get("create"):

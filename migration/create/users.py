@@ -175,16 +175,35 @@ def migrate_users(
         logger.info("User migration is disabled in config (users.migrate: false)")
         return {}
     
-    # Validate SCIM tokens are provided when migration is enabled
-    if not source_service.scim_token:
-        logger.error("User migration requires source SCIM token (source.scim_token) but it's not provided")
-        raise ValueError("Source SCIM token is required when users.migrate is true")
-    
-    if not target_service.scim_token:
-        logger.error("User migration requires target SCIM token (target.scim_token) but it's not provided")
-        raise ValueError("Target SCIM token is required when users.migrate is true")
-    
     create_users = users_config.get('create', False)
+
+    # Only CREATING users needs SCIM. Matching an existing target user to a
+    # source user is done by email through the public authors endpoint, which
+    # every plan has, so a workspace without SCIM (SCIM is an Enterprise
+    # feature) can still keep authorship by having its users created in the
+    # target beforehand.
+    if create_users:
+        if not source_service.scim_token:
+            logger.error(
+                "users.create is true, which needs the source SCIM token "
+                "(source.scim_token). Set users.create to false to match "
+                "existing target users by email instead."
+            )
+            raise ValueError("Source SCIM token is required when users.create is true")
+
+        if not target_service.scim_token:
+            logger.error(
+                "users.create is true, which needs the target SCIM token "
+                "(target.scim_token). Set users.create to false to match "
+                "existing target users by email instead."
+            )
+            raise ValueError("Target SCIM token is required when users.create is true")
+    elif not (source_service.scim_token and target_service.scim_token):
+        logger.info(
+            "No SCIM tokens, so no users will be created. Source users are "
+            "matched to existing target users by email address; anything "
+            "unmatched falls back to users.default."
+        )
     create_inactive = not users_config.get("only_active", True)
     default_user_id = users_config.get('default', 1)
     

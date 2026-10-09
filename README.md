@@ -19,7 +19,7 @@ The source workspace is only read, never modified.
 | Source entity | Qase entity in the target | Status | Notes |
 |---|---|---|---|
 | Projects | Projects | ✅ | Same project code. A target project that already holds data is skipped unless you resume or allow it, see [section 10](#10-re-run-and-resume-behaviour) |
-| Users | Users (matched by email) | ✅ Optional | `users.migrate`. Missing users can be created through SCIM with `users.create` |
+| Users | Users (matched by email) | ✅ Optional | `users.migrate` matches existing target users by email, no SCIM needed. Missing users can also be created, which needs SCIM and `users.create` |
 | Groups | Groups | ✅ Optional | `groups.create`, only when `users.migrate` is true |
 | Custom fields | Custom fields | ✅ | Workspace-global. An existing field of the same title and type is reused |
 | Shared parameters | Shared parameters | ✅ | |
@@ -123,14 +123,23 @@ The token's user must be able to see every project you are migrating. Read acces
 
 The token's user must be able to create projects and custom fields in the target workspace.
 
-**SCIM tokens, only when migrating users** (`users.migrate: true`)
+**SCIM tokens, only when creating users** (`users.create: true`)
 
 1. In each workspace, create a SCIM token at **Workspace > SCIM**.
 2. Put them in `source.scim_token` and `target.scim_token`, or set `QASE_SOURCE_SCIM_TOKEN` and `QASE_TARGET_SCIM_TOKEN`.
 
-The API token cannot manage users; that needs the SCIM token.
+The API token cannot manage users; creating them needs the SCIM token. SCIM is an
+**Enterprise** feature.
 
-> **Seats.** With `users.create: true`, every source user with no match in the target is created there, and **each one consumes a seat**. `users.only_active: true`, the default, keeps deactivated source users out. Preflight reports how many source users are active and inactive before you run.
+> **No SCIM? You can still keep authorship.** With `users.migrate: true` and
+> `users.create: false`, no SCIM token is needed. Source users are matched to
+> target users **by email address** through the public API, and migrated cases,
+> runs and results keep the matched user as their author. Create the people you
+> care about in the target workspace first, with the same email addresses, and
+> preflight will tell you how many of your source users it can match before you
+> run. Anyone unmatched falls back to `users.default`.
+
+> **Seats.** With `users.create: true`, every source user with no match in the target is created there. Active users **each consume a seat**; with `users.only_active: false`, users who are deactivated in the source are recreated as deactivated. `users.only_active: true`, the default, leaves them out entirely. Preflight reports how many source users are active and inactive before you run.
 
 **Nothing needs to be created in the target beforehand.** Projects, custom fields and everything else are created by the migration.
 
@@ -160,7 +169,7 @@ Then edit `config.json`. Every key is listed below. `config.json` is gitignored;
 | `api_token` | Yes | | API token for that workspace. `QASE_SOURCE_API_TOKEN` / `QASE_TARGET_API_TOKEN` override it |
 | `host` | No | `qase.io` | `qase.io` for Qase Cloud, or your cluster's hostname such as `company.qase.io`. Qase Cloud is served at `api.qase.io`; a dedicated cluster at `api-<host>` |
 | `ssl` | No | `true` | Use HTTPS. Leave it on |
-| `scim_token` | When `users.migrate` is true | | SCIM token for that workspace |
+| `scim_token` | When `users.create` or `groups.create` is true | | SCIM token for that workspace. An Enterprise feature, and only needed to create users or groups |
 | `scim_host` | No | derived | Override only if SCIM is not at `app.qase.io` (Cloud) or `app-<host>` (dedicated cluster) |
 
 **`projects`**, which projects to migrate
@@ -176,9 +185,9 @@ Then edit `config.json`. Every key is listed below. `config.json` is gitignored;
 | Key | Required | Default | Purpose |
 |---|---|---|---|
 | `default` | No | `1` | Target user for anything whose author has no match. **An email address**, such as `"qa.lead@company.com"`, or a numeric user id. An email must belong to a user in the target, or preflight fails. `1` is the workspace owner |
-| `migrate` | No | `false` | Match source users to target users by email, so authors carry over. Needs both SCIM tokens |
-| `create` | No | `false` | Create missing users in the target through SCIM. **Consumes seats** |
-| `only_active` | No | `true` | When creating users, skip those deactivated in the source |
+| `migrate` | No | `false` | Match source users to target users by email, so authors carry over. Works without SCIM; unmatched users fall back to `default` |
+| `create` | No | `false` | Create missing users in the target through SCIM, which needs both SCIM tokens. Active users **consume seats** |
+| `only_active` | No | `true` | When creating users, skip those deactivated in the source. With `false` they are recreated as deactivated, which takes no seat |
 | `skip_creation_confirm` | No | `false` | When `create` is true, the run lists the users it will create and asks you to type `yes`. Set this to `true` for an unattended run. Without a terminal and without this, no users are created |
 
 **`groups`**

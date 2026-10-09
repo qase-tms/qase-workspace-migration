@@ -464,3 +464,98 @@ def test_example_config_defaults_to_keeping_run_scope():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     config, _ = load_config(os.path.join(root, "config.example.json"))
     assert config["runs"]["link_to_plan"] is False
+
+
+# --------------------------------------------------------------------------
+# Users without SCIM: matching existing target users by email
+#
+# SCIM is an Enterprise feature. Creating users needs it; matching users that
+# already exist in the target does not, because both sides are read through the
+# public authors endpoint. These tests pin that down, since the difference
+# decides whether migrated history carries real author names or one default user.
+# --------------------------------------------------------------------------
+
+def _user_service(scim_token=None):
+    """A QaseService-shaped stub: only the SCIM attributes are consulted."""
+    return SimpleNamespace(
+        scim_token=scim_token,
+        scim_client=None,
+        client=SimpleNamespace(configuration=SimpleNamespace(host="https://api.qase.io/v1")),
+    )
+
+
+def _run_migrate_users(monkeypatch, config, source_users, target_users):
+    from migration.create import users as users_module
+    from migration.extract import users as extract_users_module
+
+    # migrate_users imports extract_users inside the function, so patch it at
+    # its source module rather than on the importer.
+    monkeypatch.setattr(extract_users_module, "extract_users", lambda _svc: source_users)
+
+    class _FakeAuthorsApi:
+        def __init__(self, _client):
+            pass
+
+        def get_authors(self, limit=100, offset=0, type=None):
+            entities = target_users if offset == 0 else []
+            # extract_entities_from_response needs both status and result.
+            return SimpleNamespace(status=True, result=SimpleNamespace(entities=entities))
+
+    monkeypatch.setattr(users_module, "AuthorsApi", _FakeAuthorsApi)
+
+    mappings = SimpleNamespace(users={}, user_uuid_mapping={}, user_email_mapping={})
+    stats = SimpleNamespace(add_entity=lambda *a, **k: None)
+    return users_module.migrate_users(
+        _user_service(config.get("_source_scim")),
+        _user_service(config.get("_target_scim")),
+        mappings,
+        stats,
+        config,
+    )
+
+
+SOURCE_USERS = [
+    {"id": 11, "email": "Ada@company.com", "name": "Ada", "is_active": True},
+    {"id": 12, "email": "grace@company.com", "name": "Grace", "is_active": True},
+    {"id": 13, "email": "gone@company.com", "name": "Gone", "is_active": False},
+]
+TARGET_USERS = [
+    {"id": 91, "email": "ada@company.com", "name": "Ada", "is_active": True},
+    {"id": 92, "email": "grace@company.com", "name": "Grace", "is_active": True},
+]
+
+
+def test_users_match_by_email_without_scim(monkeypatch):
+    """No SCIM tokens: existing target users are still matched, case-insensitively."""
+    mapping = _run_migrate_users(
+        monkeypatch,
+        {"users": {"migrate": True, "create": False, "default": 1}},
+        SOURCE_USERS,
+        TARGET_USERS,
+    )
+    assert mapping[11] == 91, "mixed-case source email should match the target user"
+    assert mapping[12] == 92
+    # A source user with no target match is pointed at users.default, so their
+    # cases and runs still get a valid author rather than failing to create.
+    assert mapping[13] == 1, "an unmatched source user falls back to users.default"
+
+
+def test_user_creation_still_requires_scim(monkeypatch):
+    """users.create is the part that genuinely needs SCIM, so it must still refuse."""
+    with pytest.raises(ValueError, match="SCIM token is required"):
+        _run_migrate_users(
+            monkeypatch,
+            {"users": {"migrate": True, "create": True, "default": 1}},
+            SOURCE_USERS,
+            TARGET_USERS,
+        )
+
+
+def test_migrate_users_disabled_returns_empty(monkeypatch):
+    """users.migrate false stays a no-op, whatever else is set."""
+    assert _run_migrate_users(
+        monkeypatch,
+        {"users": {"migrate": False, "create": True}},
+        SOURCE_USERS,
+        TARGET_USERS,
+    ) == {}

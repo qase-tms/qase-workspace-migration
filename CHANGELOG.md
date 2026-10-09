@@ -6,6 +6,27 @@ Notable changes to this migration, newest first. Versions follow
 capability that needs no action from you, and a **patch** means fixes and
 documentation.
 
+## 1.1.0 (2026-10-09)
+
+### Added
+- **Authorship now carries over without SCIM.** With `users.migrate: true` and
+  `users.create: false`, source users are matched to the users already in your
+  target workspace **by email address**, so migrated cases, runs and results keep
+  the right author. SCIM is an Enterprise feature and is now only needed to
+  *create* users. If you are not on Enterprise, create the people you need in the
+  target workspace first with the same email addresses; anyone unmatched falls
+  back to `users.default` as before. Previously `users.migrate: true` without
+  SCIM tokens stopped the run with an error.
+- Preflight reports how many of your users it can match, for example
+  `User matching by email: 4 of 8 source users exist in the target`, and names
+  the shortfall before you run rather than after.
+
+### Fixed
+- `users.only_active: false` recreates users who are deactivated in the source as
+  deactivated in the target, so they take no seat. The documentation and
+  preflight previously implied they consumed a seat like active users, which
+  could have made this setting look more expensive than it is.
+
 ## 1.0.0 (2026-09-25)
 
 First release as an official Qase product. The migration itself predates this
