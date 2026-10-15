@@ -17,6 +17,32 @@ from migration.transform.attachments import replace_attachment_hashes_in_text
 logger = logging.getLogger(__name__)
 
 
+def source_attachment_hash(att_item: Any) -> Optional[str]:
+    """
+    The source hash of one attachment reference, whatever shape it arrives in.
+
+    Qase returns attachments as plain hash strings in some payloads and as
+    objects in others, including inside step definitions. Treating an object as
+    a dict key raises "unhashable type: dict" and takes the whole test case
+    migration down with it, so every call site goes through here.
+    """
+    if isinstance(att_item, str):
+        return att_item
+    if isinstance(att_item, dict):
+        if att_item.get("hash"):
+            return att_item["hash"]
+        url = att_item.get("url")
+        if url:
+            match = re.search(r"/attachment/([a-f0-9]{32,64})/", str(url), re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+    hash_attr = getattr(att_item, "hash", None)
+    if isinstance(hash_attr, str) and hash_attr:
+        return hash_attr
+    return None
+
+
 def transform_case_data(
     case_dict: Dict[str, Any],
     suite_mapping: Dict[int, int],
@@ -188,18 +214,8 @@ def transform_case_data(
     mapped_case_attachments = []
     if case_attachments and attachment_mapping:
         for att_item in case_attachments:
-            source_hash = None
-            if isinstance(att_item, str):
-                source_hash = att_item
-            elif isinstance(att_item, dict):
-                if 'hash' in att_item:
-                    source_hash = att_item['hash']
-                elif 'url' in att_item:
-                    url = att_item['url']
-                    match = re.search(r'/attachment/([a-f0-9]{32,64})/', url, re.IGNORECASE)
-                    if match:
-                        source_hash = match.group(1)
-            
+            source_hash = source_attachment_hash(att_item)
+
             if source_hash:
                 mapped_hash = attachment_mapping.get(source_hash)
                 if mapped_hash:
@@ -269,8 +285,11 @@ def transform_case_data(
                 step_attachments = step_dict.get('attachments', []) or []
                 mapped_step_attachments = []
                 if step_attachments and attachment_mapping:
-                    for att_hash in step_attachments:
-                        mapped_hash = attachment_mapping.get(att_hash)
+                    for att_item in step_attachments:
+                        source_hash = source_attachment_hash(att_item)
+                        if not source_hash:
+                            continue
+                        mapped_hash = attachment_mapping.get(source_hash)
                         if mapped_hash:
                             mapped_step_attachments.append(mapped_hash)
                 

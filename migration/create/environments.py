@@ -2,6 +2,7 @@
 Create environments in target Qase workspace.
 """
 import logging
+import re
 from typing import Dict, Any, List
 from qase.api_client_v1.api.environments_api import EnvironmentsApi
 from qase.api_client_v1.models import EnvironmentCreate
@@ -60,12 +61,18 @@ def migrate_environments(
         if not title:
             continue
         
-        env_data = EnvironmentCreate(
-            title=title,
-            slug=slug or '',
-            host=host or ''
-        )
-        
+        # Qase converts empty strings to null and then rejects null for these
+        # fields: sending host="" fails with "The host must be a string", while
+        # omitting it succeeds. So only send what actually has a value.
+        if not isinstance(slug, str) or not slug.strip():
+            slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-') or 'default'
+
+        env_kwargs = {'title': title, 'slug': slug}
+        if isinstance(host, str) and host.strip():
+            env_kwargs['host'] = host
+
+        env_data = EnvironmentCreate(**env_kwargs)
+
         if description:
             env_data.description = description
         

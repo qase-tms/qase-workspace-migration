@@ -6,6 +6,21 @@ Notable changes to this migration, newest first. Versions follow
 capability that needs no action from you, and a **patch** means fixes and
 documentation.
 
+## 1.1.1 (2026-10-15)
+
+### Fixed
+- **Test cases no longer fail for a whole project when a step has an
+  attachment.** Qase returns a step's attachments as objects in some payloads
+  and as plain hashes in others. The migration assumed hashes, and an object
+  raised `TypeError: unhashable type: 'dict'`, which aborted the entire test
+  case step for that project and left it with zero cases. All attachment
+  references, on cases and on steps, now accept either shape. If you hit this,
+  re-run the affected projects into an empty target.
+- **Environments with no host no longer fail with
+  `The host must be a string`.** An empty host was sent as `""`, which Qase
+  converts to null and then rejects. It is now left out of the request, and an
+  environment with no slug gets one derived from its title.
+
 ## 1.1.0 (2026-10-09)
 
 ### Added

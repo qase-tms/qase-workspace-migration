@@ -559,3 +559,93 @@ def test_migrate_users_disabled_returns_empty(monkeypatch):
         SOURCE_USERS,
         TARGET_USERS,
     ) == {}
+
+
+# --------------------------------------------------------------------------
+# Attachment references inside steps
+#
+# Qase returns a step's attachments as hash strings in some payloads and as
+# objects in others. Using an object as a dict key raises "unhashable type:
+# dict", which aborted the whole test case migration for a project mid-run.
+# --------------------------------------------------------------------------
+
+def test_source_attachment_hash_accepts_every_shape():
+    from migration.create.cases import source_attachment_hash
+
+    h = "a" * 32
+    assert source_attachment_hash(h) == h, "plain hash string"
+    assert source_attachment_hash({"hash": h}) == h, "object carrying a hash"
+    assert source_attachment_hash(
+        {"url": f"https://company.qase.io/attachment/{h}/screenshot.png"}
+    ) == h, "object carrying only a url"
+    assert source_attachment_hash(SimpleNamespace(hash=h)) == h, "SDK model object"
+    assert source_attachment_hash({"file_name": "no-hash-here.png"}) is None
+    assert source_attachment_hash(None) is None
+
+
+def test_step_attachments_as_objects_do_not_crash():
+    """The exact shape that raised TypeError: unhashable type: 'dict'."""
+    from migration.create.cases import transform_case_data
+
+    source_hash, target_hash = "b" * 32, "c" * 32
+    case = {
+        "id": 1,
+        "title": "case with an attachment on a step",
+        "steps": [{"action": "do the thing", "attachments": [{"hash": source_hash}]}],
+    }
+    mappings = SimpleNamespace(
+        default_user_id=1,
+        get_user_id=lambda _uid: 1,
+        target_workspace_hash=None,
+        custom_fields={},
+    )
+
+    case_data = transform_case_data(
+        case, {}, {}, {}, {}, {}, {}, {source_hash: target_hash}, mappings
+    )
+
+    assert case_data is not None
+    assert case_data["steps"][0]["attachments"] == [target_hash], (
+        "a step attachment given as an object should map to the target hash"
+    )
+
+
+# --------------------------------------------------------------------------
+# Environments: Qase turns "" into null and then rejects null
+# --------------------------------------------------------------------------
+
+def test_environment_payload_omits_empty_host(monkeypatch):
+    """host="" is a 400 from the API; the field has to be left out entirely."""
+    from migration.create import environments as env_module
+
+    sent = []
+
+    class _FakeEnvironmentsApi:
+        def __init__(self, _client):
+            pass
+
+        def create_environment(self, code=None, environment_create=None):
+            sent.append(environment_create.to_dict())
+            return SimpleNamespace(status=True, result=SimpleNamespace(id=7))
+
+    monkeypatch.setattr(env_module, "EnvironmentsApi", _FakeEnvironmentsApi)
+    # imported inside the function, so patch it at its source module
+    from migration.extract import environments as extract_env_module
+    monkeypatch.setattr(
+        extract_env_module, "extract_environments",
+        lambda *a, **k: [
+            {"id": 1, "title": "Staging", "slug": "staging", "host": ""},
+            {"id": 2, "title": "Prod Cluster", "slug": None, "host": "https://prod"},
+        ],
+    )
+
+    mappings = SimpleNamespace(environments={})
+    stats = SimpleNamespace(add_entity=lambda *a, **k: None, add_reused=lambda *a, **k: None)
+    env_module.migrate_environments(
+        SimpleNamespace(client=None), SimpleNamespace(client=None),
+        "SRC", "TGT", mappings, stats,
+    )
+
+    assert "host" not in sent[0], "an empty host must not be sent at all"
+    assert sent[1]["host"] == "https://prod", "a real host must still be sent"
+    assert sent[1]["slug"] == "prod-cluster", "a missing slug is derived from the title"
