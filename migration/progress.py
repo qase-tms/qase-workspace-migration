@@ -284,6 +284,15 @@ class ProjectMigrationProgress:
             return
         with self._lock:
             self._results_done += n
+            # The cap is an estimate taken from each run's case count, and a case
+            # can hold several results (a re-run shows as "Passed + 2"), so the
+            # real total is often higher. Grow the cap rather than printing
+            # something like 63896/55614, which reads like a fault.
+            if self._results_done > self._results_cap:
+                self._results_cap = self._results_done
+                self._pbar.total = max(
+                    1, self._cases_cap + self._runs_cap + self._results_cap
+                )
             self._pbar.update(n)
             self._refresh_desc()
 

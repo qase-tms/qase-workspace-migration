@@ -414,6 +414,9 @@ def download_attachment(
     """
     file_content = None
     filename = None
+    # Every path that can end without content records why, so a missing
+    # attachment can be explained instead of just counted.
+    failure_reason: Optional[str] = None
 
     if markdown_url:
         parsed = urlparse(markdown_url)
@@ -438,6 +441,10 @@ def download_attachment(
             break
         except ApiException as e:
             if e.status == 404:
+                failure_reason = (
+                    "the source API has no attachment with this hash (404), so the "
+                    "file is referenced but no longer stored"
+                )
                 download_response = None
                 break
             if e.status == 429 or (e.status is not None and e.status >= 500):
@@ -453,6 +460,7 @@ def download_attachment(
                     )
                     time.sleep(delay)
                     continue
+            failure_reason = f"get_attachment returned HTTP {getattr(e, 'status', '?')}"
             logger.debug("get_attachment failed for %s: %s", attachment_hash[:12], e)
             download_response = None
             break
@@ -461,6 +469,7 @@ def download_attachment(
                 delay = exponential_backoff_delay(attempt, base_delay=_ATTACHMENT_GET_BASE_DELAY)
                 time.sleep(delay)
                 continue
+            failure_reason = f"get_attachment failed: {api_error}"
             logger.debug("get_attachment error for %s: %s", attachment_hash[:12], api_error)
             download_response = None
             break
@@ -476,8 +485,9 @@ def download_attachment(
                 elif isinstance(attachment_obj.file, str):
                     try:
                         file_content = base64.b64decode(attachment_obj.file)
-                    except Exception:
-                        pass
+                    except Exception as decode_error:
+                        failure_reason = f"the file content could not be decoded: {decode_error}"
+
             
             if not filename:
                 if hasattr(attachment_obj, 'filename') and attachment_obj.filename:
@@ -508,8 +518,18 @@ def download_attachment(
                             url_response = qase_http.get(url_to_download, headers=headers, timeout=60)
                             if url_response.status_code == 200:
                                 file_content = url_response.content
+                            else:
+                                failure_reason = (
+                                    f"the stored file rejected the download even with the "
+                                    f"API token (HTTP {url_response.status_code})"
+                                )
+                        else:
+                            failure_reason = (
+                                f"downloading the stored file returned HTTP "
+                                f"{url_response.status_code}"
+                            )
                     except Exception as e:
-                        pass
+                        failure_reason = f"downloading the stored file failed: {e}" 
     
     if not file_content and markdown_url:
         try:
@@ -528,11 +548,20 @@ def download_attachment(
                         parsed = urlparse(markdown_url)
                         filename = os.path.basename(parsed.path) or f"attachment_{attachment_hash[:8]}.bin"
         except Exception as e:
-            pass
-    
+            failure_reason = f"downloading from the attachment URL failed: {e}"
+
     if not filename:
         filename = f"attachment_{attachment_hash[:8]}.bin"
-    
+
+    if not file_content:
+        # The one place that knows why, so the operator is told rather than left
+        # with a count of missing files.
+        logger.warning(
+            "Attachment %s was not migrated: %s",
+            attachment_hash[:12] if isinstance(attachment_hash, str) else attachment_hash,
+            failure_reason or "the API returned no content and no usable file URL",
+        )
+
     return file_content, filename
 
 
@@ -627,18 +656,7 @@ def _download_batch_parallel(
                 continue
             if content and filename:
                 out.append((src_hash, filename, content))
-            else:
-                # Previously dropped in silence, which is how a run could report
-                # 119 of 386 attachments missing with nothing in the log to
-                # explain it. The underlying cause is logged by
-                # download_attachment at debug level; this line is the one that
-                # reaches the report.
-                logger.warning(
-                    "Attachment %s could not be downloaded from the source and "
-                    "was not migrated (no content returned). Run with "
-                    "logging.level debug for the API response behind it.",
-                    src_hash[:12] if isinstance(src_hash, str) else src_hash,
-                )
+            # No else: download_attachment already logged the specific reason.
     return out
 
 

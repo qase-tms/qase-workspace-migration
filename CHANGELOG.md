@@ -6,6 +6,27 @@ Notable changes to this migration, newest first. Versions follow
 capability that needs no action from you, and a **patch** means fixes and
 documentation.
 
+## 1.4.0 (2026-10-16)
+
+### Fixed
+- **Attachments on test case steps are migrated again.** A step attachment comes
+  back from the API as an object, and the migration used that object as if it
+  were the file's hash, producing entries like `{'size': 455, 'mime': ...}`. Those
+  never matched a real file, so they were reported as failed downloads, while the
+  files behind them were never collected at all. One project reported 119 of 386
+  attachments missing entirely because of this; all 119 were these phantoms.
+- **Migrated results carry their test case's title.** The results API returns no
+  title, and the migration fell back to a placeholder, so runs arrived full of
+  rows called "Automated Test 123" even though each result was correctly linked
+  to its case. The case title is now used.
+- **Results whose case was deleted are no longer reported as a fault.** The run
+  now separates a result whose case still exists but was not migrated, which is a
+  real problem, from one whose case no longer exists in the source, which simply
+  has nothing to link to. Both were previously reported as errors.
+- The progress bar no longer shows more results than its own total. The total was
+  estimated from each run's case count, and a case can hold several results, so a
+  long run could end up reading `63896/55614`.
+
 ## 1.3.1 (2026-10-16)
 
 ### Fixed

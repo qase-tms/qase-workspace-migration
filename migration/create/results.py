@@ -515,7 +515,7 @@ def _fetch_source_case_metadata(
     Single get_case for source workspace. Does not use retry_with_backoff so 404s stay quiet
     (deleted / missing cases still appear in old run results).
     """
-    meta: Dict[str, Any] = {"steps": [], "suite_path_titles": []}
+    meta: Dict[str, Any] = {"steps": [], "suite_path_titles": [], "title": None}
     try:
         cases_api = CasesApi(source_service.client)
         resp = cases_api.get_case(code=project_code, id=case_id)
@@ -523,6 +523,10 @@ def _fetch_source_case_metadata(
             cd = to_dict(resp.result)
             meta["steps"] = cd.get("steps") or []
             meta["suite_path_titles"] = _suite_path_titles_from_case_dict(cd)
+            # The v1 results API returns no title for a result, so without this
+            # every migrated result was titled "Automated Test <id>" even when it
+            # was correctly linked to its case.
+            meta["title"] = cd.get("title")
     except ApiException as e:
         if e.status == 404:
             logger.debug(
@@ -606,6 +610,9 @@ def enrich_source_result_for_v2(
             spt = meta.get("suite_path_titles") or []
             if isinstance(spt, list) and spt:
                 out["_source_suite_path_titles"] = spt
+            case_title = meta.get("title")
+            if case_title and not out.get("case_title"):
+                out["case_title"] = case_title
             if case_steps:
                 merged = _merge_result_steps_with_case_steps(
                     steps_list or [],
@@ -671,22 +678,55 @@ def reset_unmatched_result_counters() -> None:
     _UNMATCHED_NO_CASE_ID.clear()
 
 
-def report_unmatched_results(project_code_source: str, stats: Any = None) -> None:
-    """Say, once per project, how many results lost their test case and why."""
+def report_unmatched_results(
+    project_code_source: str, stats: Any = None, source_case_ids: Optional[set] = None
+) -> None:
+    """
+    Say, once per project, how many results lost their test case and why.
+
+    A result naming a case the source still has is a mapping problem on our
+    side. A result naming a case the source no longer has has nothing to link
+    to, which is the documented unlinked-results behaviour. They look the same
+    in the data and mean opposite things, so they are reported separately.
+    """
     named = list(_UNMATCHED_WITH_CASE_ID)
     unnamed = list(_UNMATCHED_NO_CASE_ID)
-    if named:
-        sample = ", ".join(str(c) for c in sorted(set(named))[:10])
+
+    still_in_source, deleted_in_source = [], []
+    for case_id in named:
+        try:
+            cid = int(case_id)
+        except (TypeError, ValueError):
+            still_in_source.append(case_id)
+            continue
+        if source_case_ids is None or cid in source_case_ids:
+            still_in_source.append(cid)
+        else:
+            deleted_in_source.append(cid)
+
+    if still_in_source:
+        sample = ", ".join(str(c) for c in sorted(set(still_in_source), key=str)[:10])
         message = (
-            f"{len(named)} result(s) in {project_code_source} reference a source test "
-            f"case that was not found in the migrated set, so Qase created a stand-in "
-            f"case for each (\"Automated Test <id>\"). Source case ids include: {sample}. "
-            f"These cases exist in the source, so this is a mapping problem rather than "
-            f"deleted cases."
+            f"{len(still_in_source)} result(s) in {project_code_source} reference a source "
+            f"test case that still exists but was not found in the migrated set, so Qase "
+            f"created a stand-in case for each (\"Automated Test <id>\"). Source case ids "
+            f"include: {sample}. The cases are there, so this is a mapping problem."
         )
         logger.error(message)
         if stats is not None and hasattr(stats, "add_error"):
             stats.add_error("results", message)
+
+    if deleted_in_source:
+        sample = ", ".join(str(c) for c in sorted(set(deleted_in_source))[:10])
+        logger.warning(
+            "%s result(s) in %s reference test cases that no longer exist in the source "
+            "(ids include %s), so there is nothing to link them to. Each becomes a "
+            "stand-in case. This is the documented unlinked-results behaviour.",
+            len(deleted_in_source),
+            project_code_source,
+            sample,
+        )
+
     if unnamed:
         logger.warning(
             "%s result(s) in %s carry no test case at all, usually automated runs "
@@ -2123,6 +2163,10 @@ def migrate_results(
 
     # Say how many results lost their test case, so a project full of stand-in
     # cases is visible in the report rather than only on screen.
-    report_unmatched_results(project_code_source, stats)
+    report_unmatched_results(
+        project_code_source,
+        stats,
+        getattr(mappings, "source_case_ids", {}).get(project_code_source),
+    )
 
     return result_hash_mapping

@@ -144,8 +144,14 @@ def extract_attachment_hashes_from_cases(
                     for step in case_dict['steps']:
                         step_dict = to_dict(step)
                         if step_dict.get('attachments'):
-                            normalized = {str(att).lower() for att in step_dict['attachments'] if att}
-                            all_hashes.update(normalized)
+                            # Step attachments arrive as objects as well as plain
+                            # hashes. Stringifying an object produced hashes like
+                            # "{'size': 455, 'mime': ...}", which then failed to
+                            # download and were counted as missing attachments,
+                            # while the real file was never collected at all.
+                            _ingest_attachment_like_items(
+                                step_dict['attachments'], all_hashes, url_map
+                            )
                         
                         step_text_fields = ['action', 'expected_result', 'data']
                         step_text_hashes = extract_attachment_hashes_from_dict(step_dict, step_text_fields)

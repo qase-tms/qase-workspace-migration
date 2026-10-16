@@ -386,6 +386,16 @@ def migrate_cases(
         mappings.source_case_counts = {}
     mappings.source_case_counts[project_code_source] = total_cases_processed
 
+    # The ids the source actually has. The results step uses this to tell a
+    # result whose case we failed to map (our problem) from one whose case was
+    # deleted in the source (nothing left to link to), which look identical
+    # otherwise and mean opposite things.
+    if not hasattr(mappings, 'source_case_ids'):
+        mappings.source_case_ids = {}
+    mappings.source_case_ids[project_code_source] = {
+        int(c['id']) for c in all_source_cases if c.get('id') is not None
+    }
+
     # Cases migrated by a previous run are reused, not created a second time.
     existing = dict(mappings.cases.get(project_code_source, {}))
     for case_dict in all_source_cases:

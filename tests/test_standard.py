@@ -772,3 +772,78 @@ def test_run_payload_carries_environment_and_tags(monkeypatch):
     assert sorted(sent[0].get("tags") or []) == ["nightly", "systemtest"], (
         "tags, including object-shaped ones, must be sent"
     )
+
+
+def test_result_title_uses_the_case_title_not_a_placeholder():
+    """
+    The v1 results API returns no title for a result, so every migrated result
+    was titled "Automated Test <id>" even when it was linked to the right case.
+    The case title fetched during enrichment is now used instead.
+    """
+    from migration.create.results import _resolve_result_display_title
+
+    # with the case title present, that is what the result is called
+    assert _resolve_result_display_title(
+        {"case_id": 608, "case_title": "Forvaltning FK_72_6"}, 608
+    ) == "Forvaltning FK_72_6"
+
+    # with no case at all, the placeholder is still the honest answer
+    assert _resolve_result_display_title({"id": 9}, None) == "Automated Test 9"
+
+    # a title on the result itself still wins
+    assert _resolve_result_display_title(
+        {"title": "from the result", "case_title": "from the case"}, 1
+    ) == "from the result"
+
+
+def test_step_attachments_do_not_become_stringified_objects():
+    """
+    Case step attachments arrive as objects as well as hashes. Stringifying an
+    object produced hashes like "{'size': 455, 'mime': ...}", which then failed
+    to download and were reported as missing attachments, while the real file
+    was never collected.
+    """
+    from migration.extract.attachments import _ingest_attachment_like_items
+
+    real = "a" * 32
+    hashes, urls = set(), {}
+    _ingest_attachment_like_items(
+        [
+            {"hash": real, "size": 455, "mime": "image/png"},
+            real.replace("a", "b"),
+            {"size": 123},  # nothing usable, must be ignored rather than stringified
+        ],
+        hashes,
+        urls,
+    )
+
+    assert real in hashes
+    assert "b" * 32 in hashes
+    assert not any("size" in h or "{" in h for h in hashes), (
+        f"an attachment object must never be used as a hash: {hashes}"
+    )
+    assert len(hashes) == 2
+
+
+def test_unmatched_results_split_mapping_problems_from_deleted_cases(caplog):
+    """
+    A result naming a case the source still has is our bug. One naming a case
+    the source no longer has is the documented unlinked-results case. Reporting
+    both the same way cries wolf, which it did on a verification run.
+    """
+    from migration.create import results as R
+
+    R.reset_unmatched_result_counters()
+    R._UNMATCHED_WITH_CASE_ID.extend([5, 801])  # 5 still exists, 801 was deleted
+    errors, warnings = [], []
+    stats = SimpleNamespace(add_error=lambda entity, msg: errors.append(msg))
+
+    with caplog.at_level(logging.WARNING, logger="migration.create.results"):
+        R.report_unmatched_results("ECSE", stats, source_case_ids={5, 7, 9})
+
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert errors, "a case that still exists must be reported as an error"
+    assert "mapping problem" in errors[0]
+    assert "5" in errors[0] and "801" not in errors[0]
+    assert "no longer exist in the source" in joined
+    assert "unlinked-results" in joined
