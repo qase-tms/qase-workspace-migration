@@ -4,7 +4,11 @@ Create custom fields in target Qase workspace.
 import logging
 from typing import Dict, Any, List, Optional
 from qase.api_client_v1.api.custom_fields_api import CustomFieldsApi
-from qase.api_client_v1.models import CustomFieldCreate, CustomFieldCreateValueInner
+from qase.api_client_v1.models import (
+    CustomFieldCreate,
+    CustomFieldCreateValueInner,
+    CustomFieldUpdate,
+)
 from qase_service import QaseService
 from migration.utils import MigrationMappings, MigrationStats, retry_with_backoff, extract_entities_from_response, to_dict
 
@@ -58,6 +62,10 @@ def get_existing_custom_fields(target_service: QaseService) -> Dict[str, Dict[st
                         'id': existing_id,
                         'type': existing_dict.get('type'),
                         'entity': existing_dict.get('entity'),
+                        'projects_codes': existing_dict.get('projects_codes') or [],
+                        'is_enabled_for_all_projects': existing_dict.get(
+                            'is_enabled_for_all_projects'
+                        ),
                     }
     except Exception as e:
         logger.error(f"Error fetching existing custom fields: {e}")
@@ -70,7 +78,8 @@ def create_custom_field(
     target_service: QaseService,
     existing_fields_by_title: Dict[str, Dict[str, Any]],
     mappings: MigrationMappings,
-    stats: Optional[MigrationStats] = None
+    stats: Optional[MigrationStats] = None,
+    target_project_codes: Optional[List[str]] = None
 ) -> bool:
     """
     Create a single custom field in target workspace.
@@ -130,6 +139,43 @@ def create_custom_field(
             if stats is not None:
                 stats.add_error('custom_fields', message)
             return False
+
+        # Custom fields are workspace-global but enabled per project. Adopting a
+        # field that is not enabled for the projects being migrated means every
+        # case carrying it fails the bulk create with
+        # "The field name is not valid" for custom_field.<id>, taking the whole
+        # batch of cases with it. So widen the scope before using it.
+        if target_project_codes and not existing_info.get('is_enabled_for_all_projects'):
+            scoped = {str(c) for c in (existing_info.get('projects_codes') or [])}
+            missing = [c for c in target_project_codes if c not in scoped]
+            if missing:
+                logger.info(
+                    "Custom field %r (id %s) is not enabled for %s, adding it",
+                    field_title,
+                    existing_id,
+                    ", ".join(missing),
+                )
+                try:
+                    retry_with_backoff(
+                        custom_fields_api_target.update_custom_field,
+                        id=int(existing_id),
+                        custom_field_update=CustomFieldUpdate(
+                            title=existing_info.get('original_title') or field_title,
+                            projects_codes=sorted(scoped.union(target_project_codes)),
+                        ),
+                    )
+                except Exception as e:  # noqa: BLE001 - must not abort the run
+                    message = (
+                        f"Custom field {field_title!r} (id {existing_id}) is not enabled for "
+                        f"{', '.join(missing)} and could not be updated: {e}. Test cases using "
+                        f"this field will be rejected. Enable it for those projects under "
+                        f"Settings > Custom fields and run again."
+                    )
+                    logger.error(message)
+                    print(f"ERROR: {message}")
+                    if stats is not None:
+                        stats.add_error('custom_fields', message)
+                    return False
 
         mappings.custom_fields[source_id] = existing_id
         return True
@@ -202,7 +248,13 @@ def create_custom_field(
                 value_options.append(CustomFieldCreateValueInner(id=idx, title=title))
             idx += 1
     
-    projects_codes = field_dict.get('projects_codes', [])
+    projects_codes = list(field_dict.get('projects_codes') or [])
+    # The source scope may not name the projects this run is migrating (the
+    # codes can differ, or the field may have been scoped narrowly), and a field
+    # that is not enabled for a project cannot be used on its cases.
+    for code in (target_project_codes or []):
+        if code not in projects_codes:
+            projects_codes.append(code)
     is_enabled_for_all = field_dict.get('is_enabled_for_all_projects', False)
     
     field_data = CustomFieldCreate(
@@ -252,7 +304,8 @@ def migrate_custom_fields(
     source_service: QaseService,
     target_service: QaseService,
     mappings: MigrationMappings,
-    stats: MigrationStats
+    stats: MigrationStats,
+    target_project_codes: Optional[List[str]] = None
 ) -> Dict[int, int]:
     """
     Migrate custom fields from source to target workspace.
@@ -273,7 +326,9 @@ def migrate_custom_fields(
     
     field_mapping = {}
     for field_dict in source_fields:
-        if create_custom_field(field_dict, target_service, existing_fields, mappings, stats):
+        if create_custom_field(
+            field_dict, target_service, existing_fields, mappings, stats, target_project_codes
+        ):
             source_id = field_dict.get('id')
             if source_id in mappings.custom_fields:
                 field_mapping[source_id] = mappings.custom_fields[source_id]

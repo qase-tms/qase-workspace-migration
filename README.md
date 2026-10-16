@@ -208,6 +208,12 @@ Then edit `config.json`. Every key is listed below. `config.json` is gitignored;
 |---|---|---|---|
 | `link_to_plan` | No | `false` | For runs started from a test plan: `false` keeps each run's exact cases and drops the plan link; `true` keeps the link, and the run also gets any plan cases it did not cover, shown as untested. **Read [test plans and test runs](#test-plans-and-test-runs) before changing it** |
 
+
+#### `results`
+
+| Key | Required | Default | Description |
+|---|---|---|---|
+| `status_map` | No | `{}` | Where a custom source status lands, for example `{"Passed with comment": "passed", "Needs retest": "retest"}`. Qase accepts only `passed`, `failed`, `blocked`, `skipped`, `invalid`, `untested`, `retest` and `in_progress`, so a custom status has to map onto one of those. Anything unmapped is migrated as `skipped` and reported by name in the run report. |
 **`migration`**
 
 | Key | Required | Default | Purpose |
@@ -221,6 +227,7 @@ Then edit `config.json`. Every key is listed below. `config.json` is gitignored;
 | `mappings_file` | No | `mappings.json` | Where source to target ids are recorded. Needed to resume |
 | `resume` | No | `false` | Same as `--resume` |
 | `skip_attachments` | No | `false` | Same as `--skip-attachments`. Much faster for a trial, but the result is not a complete migration |
+| `api_calls_per_minute` | No | `600` | Request pacing for the attachment step. Qase cloud allows 600 per minute on most plans and 1000 on Enterprise; pacing above your real limit only produces rate-limit retries |
 | `parallel_project_migration` | No | `true` | Migrate several projects at once |
 | `max_parallel_projects` | No | `4` | How many at once |
 | `show_project_progress` | No | `true` | One progress bar per project in a terminal. Set `false` for plain log output |

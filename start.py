@@ -176,6 +176,15 @@ def main(argv=None) -> int:
     mappings_file = str(opts.get("mappings_file") or "mappings.json")
     link_runs_to_plans = bool((config.get("runs") or {}).get("link_to_plan", False))
 
+    # Custom source statuses ("Passed with comment") have no equivalent in the
+    # Qase API, so results.status_map decides where each one lands. Loaded once;
+    # anything unmapped is reported by name during the results phase.
+    from migration.create.results import set_status_overrides
+    set_status_overrides((config.get("results") or {}).get("status_map") or {})
+
+    from migration.create.attachments import set_api_calls_per_minute
+    set_api_calls_per_minute(opts.get("api_calls_per_minute"))
+
     missing_tokens = [
         name for name, block in (("source.api_token", source_config), ("target.api_token", target_config))
         if not str(block.get("api_token") or "").strip()
@@ -410,7 +419,8 @@ def main(argv=None) -> int:
         logger.info("="*60)
         custom_field_mapping = migrate_custom_fields(
             source_service, target_service,
-            mappings, stats
+            mappings, stats,
+            target_project_codes=[p["target_code"] for p in projects],
         )
         mappings.save_to_file(mappings_file)
         

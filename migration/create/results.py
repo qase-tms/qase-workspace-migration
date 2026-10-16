@@ -40,7 +40,13 @@ from qase.api_client_v1.api.runs_api import RunsApi
 from qase.api_client_v1.api.cases_api import CasesApi
 from qase_service import QaseService
 from migration.step_logging import set_current_project, step_log_info
-from migration.utils import MigrationMappings, MigrationStats, chunks, to_dict
+from migration.utils import (
+    MigrationMappings,
+    MigrationStats,
+    _retry_after_seconds,
+    chunks,
+    to_dict,
+)
 from migration.extract.results import ResultsFetchError, extract_results, fetch_result_detail_json
 from migration.extract.runs import fetch_run_detail_json
 from migration.extract.authors import extract_authors
@@ -643,6 +649,39 @@ def _resolve_target_author_id(
     return 1
 
 
+# Source workspaces can define custom statuses ("Passed with comment", "Retest
+# 2"). The API rejects anything outside V2_EXECUTION_STATUSES, so they have to
+# land on a standard status. `results.status_map` in the config decides where;
+# anything unmapped is reported once by name rather than quietly becoming
+# "skipped".
+_STATUS_OVERRIDES: Dict[str, str] = {}
+_UNMAPPED_STATUSES_SEEN: set = set()
+
+
+def set_status_overrides(overrides: Optional[Dict[str, str]]) -> None:
+    """Load `results.status_map` once at the start of the results phase."""
+    _STATUS_OVERRIDES.clear()
+    _UNMAPPED_STATUSES_SEEN.clear()
+    for source_status, target_status in (overrides or {}).items():
+        mapped = _map_v2_run_execution_status(str(target_status))
+        _STATUS_OVERRIDES[str(source_status).strip().lower()] = mapped
+
+
+def _note_unmapped_status(raw: str, fell_back_to: str) -> None:
+    key = raw.strip().lower()
+    if key in _UNMAPPED_STATUSES_SEEN:
+        return
+    _UNMAPPED_STATUSES_SEEN.add(key)
+    logger.warning(
+        "Result status %r has no equivalent in Qase and was migrated as %r. "
+        "Set results.status_map in the config to choose where it lands, "
+        "for example {\"%s\": \"passed\"}.",
+        raw,
+        fell_back_to,
+        raw,
+    )
+
+
 def _resolve_result_status_string(result_dict: Dict[str, Any]) -> str:
     status_map = {
         1: "passed",
@@ -653,6 +692,10 @@ def _resolve_result_status_string(result_dict: Dict[str, Any]) -> str:
     }
     status_id = result_dict.get("status_id")
     status_str = result_dict.get("status", "").lower() if result_dict.get("status") else None
+
+    raw_status = result_dict.get("status") or result_dict.get("status_text")
+    if raw_status and str(raw_status).strip().lower() in _STATUS_OVERRIDES:
+        return _STATUS_OVERRIDES[str(raw_status).strip().lower()]
 
     if status_id is not None and status_id in status_map:
         return status_map[status_id]
@@ -674,18 +717,23 @@ def _resolve_result_status_string(result_dict: Dict[str, Any]) -> str:
             return "in_progress"
         if sl in ("untested",):
             return "untested"
+        _note_unmapped_status(str(raw_status or status_str), "skipped")
         return "skipped"
     return "skipped"
 
 
+# Everything POST /v2/{code}/run/{id}/results accepts, verified against the API.
+# "retest" and "in_progress" are valid and used to be downgraded to "blocked"
+# here, which is why runs came out of a migration with no Retest results.
+V2_EXECUTION_STATUSES = frozenset(
+    {"passed", "failed", "blocked", "skipped", "invalid", "untested", "retest", "in_progress"}
+)
+
+
 def _map_v2_run_execution_status(core: str) -> str:
-    """ResultExecution.status — coerce values that commonly 422 on historical runs."""
-    c = (core or "skipped").lower()
-    if c == "retest":
-        return "blocked"
-    if c == "in_progress":
-        return "blocked"
-    if c in ("passed", "failed", "blocked", "skipped", "invalid", "untested"):
+    """ResultExecution.status, normalised to what the v2 API accepts."""
+    c = (core or "skipped").lower().strip().replace(" ", "_").replace("-", "_")
+    if c in V2_EXECUTION_STATUSES:
         return c
     return "skipped"
 
@@ -1181,7 +1229,10 @@ def _create_results_v2_with_retry(
                 isinstance(http_status, int) and 500 <= http_status <= 599
             )
             if transient and attempt < max_attempts - 1:
-                time.sleep(delay)
+                # The API tells us how long to wait when it rate limits us;
+                # guessing is both slower and ruder.
+                wait = _retry_after_seconds(e) or delay
+                time.sleep(wait)
                 delay *= 2
                 continue
             body = getattr(e, "body", None) or str(e)

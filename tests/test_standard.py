@@ -649,3 +649,113 @@ def test_environment_payload_omits_empty_host(monkeypatch):
     assert "host" not in sent[0], "an empty host must not be sent at all"
     assert sent[1]["host"] == "https://prod", "a real host must still be sent"
     assert sent[1]["slug"] == "prod-cluster", "a missing slug is derived from the title"
+
+
+# --------------------------------------------------------------------------
+# Timestamps: an offset must be converted, not discarded
+# --------------------------------------------------------------------------
+
+def test_format_datetime_converts_offsets_to_utc():
+    """
+    Qase reads a naive timestamp as UTC, so dropping "+01:00" moved every
+    timestamp by an hour: a run started 07:43 in Oslo arrived as 08:43.
+    """
+    from migration.utils import format_datetime
+
+    expected = "2026-02-09 07:43:25"
+    assert format_datetime("2026-02-09T08:43:25+01:00") == expected
+    assert format_datetime("2026-02-09T07:43:25+00:00") == expected
+    assert format_datetime("2026-02-09T07:43:25Z") == expected
+    assert format_datetime("2026-02-09T03:43:25-04:00") == expected
+    # already naive: taken as written
+    assert format_datetime("2026-02-09 07:43:25") == expected
+    assert format_datetime(None) is None
+
+
+# --------------------------------------------------------------------------
+# Result statuses
+# --------------------------------------------------------------------------
+
+def test_statuses_the_api_accepts_are_not_downgraded():
+    """retest and in_progress are valid; both used to be turned into blocked."""
+    from migration.create.results import _map_v2_run_execution_status
+
+    for status in ("passed", "failed", "blocked", "skipped", "invalid", "untested",
+                   "retest", "in_progress"):
+        assert _map_v2_run_execution_status(status) == status
+    # the API rejects a space, so normalise it
+    assert _map_v2_run_execution_status("in progress") == "in_progress"
+    # genuinely unknown still has to land somewhere valid
+    assert _map_v2_run_execution_status("Passed with comment") == "skipped"
+
+
+def test_custom_status_map_from_config():
+    """results.status_map decides where a custom source status lands."""
+    from migration.create.results import set_status_overrides, _resolve_result_status_string
+
+    set_status_overrides({"Passed with comment": "passed", "Needs retest": "retest"})
+    try:
+        assert _resolve_result_status_string({"status": "Passed with comment"}) == "passed"
+        assert _resolve_result_status_string({"status": "needs retest"}) == "retest"
+        # unmapped falls back, and the fallback is reported elsewhere
+        assert _resolve_result_status_string({"status": "Something else"}) == "skipped"
+        # a mapped name wins over the numeric status id
+        assert _resolve_result_status_string(
+            {"status": "Passed with comment", "status_id": 3}
+        ) == "passed"
+    finally:
+        set_status_overrides({})
+
+
+# --------------------------------------------------------------------------
+# Runs: environment and tags were silently dropped
+# --------------------------------------------------------------------------
+
+def test_run_payload_carries_environment_and_tags(monkeypatch):
+    from migration.create import runs as runs_module
+
+    sent = []
+
+    class _FakeRunsApi:
+        def __init__(self, _client):
+            pass
+
+        def create_run(self, code=None, run_create=None):
+            sent.append(run_create.to_dict())
+            return SimpleNamespace(status=True, result=SimpleNamespace(id=55))
+
+    monkeypatch.setattr(runs_module, "RunsApi", _FakeRunsApi)
+    monkeypatch.setattr(runs_module, "extract_run_cases", lambda *a, **k: [])
+    monkeypatch.setattr(runs_module, "fetch_run_detail_json", lambda *a, **k: {})
+    # imported inside migrate_runs, so patch it at its source module
+    from migration.extract import milestones as milestones_module
+    monkeypatch.setattr(milestones_module, "extract_milestones", lambda *a, **k: [])
+
+    source_runs = [{
+        "id": 7,
+        "title": "Systemtest Knowit",
+        "environment": {"slug": "systemtest", "title": "Systemtest"},
+        "tags": ["systemtest", {"title": "nightly"}],
+    }]
+    mappings = SimpleNamespace(
+        runs={}, users={}, milestones={}, get_user_id=lambda _u: 1, trace=None,
+        default_user_id=1,
+    )
+    stats = SimpleNamespace(
+        add_entity=lambda *a, **k: None,
+        add_error=lambda *a, **k: None,
+        add_reused=lambda *a, **k: None,
+    )
+
+    runs_module.migrate_runs(
+        SimpleNamespace(client=None), SimpleNamespace(client=None),
+        "SRC", "TGT", {}, {}, {}, {}, {}, mappings, stats,
+        source_runs_precached=source_runs,
+        environment_mapping={"slug:systemtest": 9, "title:systemtest": 9},
+    )
+
+    assert sent, "a run should have been created"
+    assert sent[0].get("environment_id") == 9, "the run's environment must be sent"
+    assert sorted(sent[0].get("tags") or []) == ["nightly", "systemtest"], (
+        "tags, including object-shaped ones, must be sent"
+    )

@@ -41,7 +41,25 @@ def migrate_environments(
     environments_api_target = EnvironmentsApi(target_service.client)
     environment_mapping = {}
     reused = 0
-    
+
+    # A run payload names its environment by slug and title rather than by id,
+    # so keep a lookup runs can resolve against. Kept apart from
+    # environment_mapping, which stays a clean source id to target id map for
+    # resume.
+    if not hasattr(mappings, 'environment_aliases'):
+        mappings.environment_aliases = {}
+    aliases = mappings.environment_aliases.setdefault(project_code_source, {})
+
+    def _register_aliases(env: Dict[str, Any], target_id: Any) -> None:
+        if not target_id:
+            return
+        slug = env.get('slug')
+        title = env.get('title')
+        if slug:
+            aliases[f"slug:{str(slug).lower()}"] = target_id
+        if title:
+            aliases[f"title:{str(title).lower()}"] = target_id
+
     for env_dict in environments:
         source_id = env_dict.get('id')
         if not source_id:
@@ -49,7 +67,9 @@ def migrate_environments(
         
         # Skip if already mapped
         if project_code_source in mappings.environments and source_id in mappings.environments[project_code_source]:
-            environment_mapping[source_id] = mappings.environments[project_code_source][source_id]
+            mapped_id = mappings.environments[project_code_source][source_id]
+            environment_mapping[source_id] = mapped_id
+            _register_aliases(env_dict, mapped_id)
             reused += 1
             continue
         
@@ -95,6 +115,7 @@ def migrate_environments(
             
             if target_id:
                 environment_mapping[source_id] = target_id
+                _register_aliases(env_dict, target_id)
     
     if project_code_source not in mappings.environments:
         mappings.environments[project_code_source] = {}

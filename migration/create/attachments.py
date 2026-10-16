@@ -41,7 +41,21 @@ MAX_BYTES_PER_FILE = 30_000_000
 # Content-Disposition, Content-Type, CRLFs). Filename length is added per file.
 MULTIPART_PART_OVERHEAD = 256
 # Qase cloud: ~1000 API req/min per account. Source and target each get their own rolling window.
-QASE_API_MAX_CALLS_PER_MINUTE = 1000
+# Qase cloud advertises 600 requests/minute plus a 100/10s burst on non
+# Enterprise plans, and 1000/minute on Enterprise. Pacing above the real ceiling
+# just converts throughput into 429s and backoff, so default to the lower figure
+# and let options.api_calls_per_minute raise it.
+QASE_API_MAX_CALLS_PER_MINUTE = 600
+
+
+def set_api_calls_per_minute(value: Optional[int]) -> None:
+    """Override the attachment pacing from options.api_calls_per_minute."""
+    global QASE_API_MAX_CALLS_PER_MINUTE
+    try:
+        if value and int(value) > 0:
+            QASE_API_MAX_CALLS_PER_MINUTE = int(value)
+    except (TypeError, ValueError):
+        pass
 DOWNLOAD_PARALLEL_WORKERS = min(24, max(8, (os.cpu_count() or 4) * 2))
 MAX_PARALLEL_TARGET_QUEUES = 4
 _BULK_UPLOAD_RETRIES = 12

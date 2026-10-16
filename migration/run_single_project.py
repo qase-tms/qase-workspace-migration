@@ -37,6 +37,23 @@ from migration.create import (
 logger = logging.getLogger(__name__)
 
 
+def _project_case_shortfall(
+    mappings: MigrationMappings, project_code_source: str, case_mapping: Dict[int, int]
+) -> int:
+    """
+    How many of this project's source cases are missing from the mapping.
+
+    Uses the per-project slice of mappings.cases, which the case step fills in,
+    rather than the workspace-wide stats counters, so a parallel run cannot
+    confuse one project's shortfall with another's.
+    """
+    recorded = (getattr(mappings, "cases", {}) or {}).get(project_code_source) or {}
+    expected = getattr(mappings, "source_case_counts", {}).get(project_code_source)
+    if not expected:
+        return 0
+    return max(0, int(expected) - len(recorded or case_mapping))
+
+
 def run_single_project_migration(
     project: Dict[str, Any],
     source_service: QaseService,
@@ -218,7 +235,48 @@ def run_single_project_migration(
             logger.error("✗ Test cases migration failed: %s", e, exc_info=True)
             case_mapping = {}
             _save()
-        
+
+        # Runs and results are only safe to migrate once the cases they point at
+        # exist. A result whose case did not migrate is given a stand-in case
+        # ("Automated Test <id>"), which is right for a handful of orphaned
+        # automated results and catastrophic for a whole project: one customer
+        # ended up with 5,238 stand-ins against 399 real cases, and every run in
+        # the project pointed at them instead of the real ones. So if the case
+        # step did not bring across everything the source has, stop here and say
+        # so, rather than filling the project with placeholders.
+        cases_are_complete = True
+        if not case_mapping:
+            cases_are_complete = False
+            shortfall_detail = "no test cases were migrated"
+        else:
+            missing_cases = _project_case_shortfall(mappings, project_code_source, case_mapping)
+            if missing_cases:
+                cases_are_complete = False
+                shortfall_detail = f"{missing_cases} test case(s) are missing"
+
+        if not cases_are_complete:
+            message = (
+                f"Skipping runs and results for {project_code_source}: {shortfall_detail}. "
+                f"Migrating them now would attach every result to a stand-in test case "
+                f"instead of the real one. Fix the cause above, delete "
+                f"{project_code_target} in the target, and run this project again."
+            )
+            logger.error(message)
+            stats.add_error("runs", message)
+            if tr:
+                tr.event(
+                    "project_runs_skipped_cases_incomplete",
+                    project_source=project_code_source,
+                    project_target=project_code_target,
+                    detail=shortfall_detail,
+                )
+            for entity_type in ("milestones", "configurations", "shared_steps", "suites", "cases", "plans"):
+                if entity_type in stats.entities_created:
+                    created = stats.entities_created.get(entity_type, 0)
+                    processed = stats.entities_processed.get(entity_type, 0)
+                    project_stats[entity_type] = f"{created}/{processed}"
+            return project_stats
+
         step_log_info(logger, "\nMigrating test plans for %s...", project_code_source)
         try:
             plan_mapping = migrate_plans(
@@ -253,6 +311,9 @@ def run_single_project_migration(
                 source_runs_precached=source_runs_precached,
                 progress=progress,
                 link_to_plan=link_runs_to_plans,
+                environment_mapping=getattr(mappings, 'environment_aliases', {}).get(
+                    project_code_source, {}
+                ),
             )
             _save()
         except Exception as e:

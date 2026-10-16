@@ -28,6 +28,8 @@ if _parent_utils_path.exists():
         extract_entities_from_response = utils_module.extract_entities_from_response
         to_dict = utils_module.to_dict
         format_datetime = utils_module.format_datetime
+        # Shared by the raw-HTTP retry paths, which honour Retry-After too.
+        _retry_after_seconds = utils_module._retry_after_seconds
         format_date = utils_module.format_date
         preserve_or_hash_id = utils_module.preserve_or_hash_id
         chunks = utils_module.chunks
@@ -55,6 +57,7 @@ if _parent_utils_path.exists():
             'fork_mappings_for_parallel_project',
             'merge_parallel_project_into_main',
             'merge_migration_stats',
+            '_retry_after_seconds',
         ]
     else:
         # Fallback: only export SCIM client if utils.py can't be loaded

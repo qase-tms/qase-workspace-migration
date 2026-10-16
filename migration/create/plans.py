@@ -73,7 +73,21 @@ def migrate_plans(
                 target_case_ids.append(target_case_id)
         
         if not target_case_ids:
-            logger.warning(f"Plan '{title}' has no valid cases to migrate, skipping")
+            # A plan is only as migratable as the cases it points at. Saying
+            # which cases are missing turns "9 plans disappeared" into something
+            # an operator can act on.
+            logger.error(
+                "Test plan %r was not migrated: none of its %s case(s) exist in the "
+                "target. Migrate the cases first, then re-run this project.",
+                title,
+                len(cases_list),
+            )
+            if stats is not None:
+                stats.add_error(
+                    'plans',
+                    f"Plan {title!r} skipped: none of its {len(cases_list)} case(s) "
+                    f"are in the target",
+                )
             continue
         
         plan_data = PlanCreate(

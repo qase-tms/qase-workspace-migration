@@ -41,6 +41,10 @@
     "link_to_plan": false
   },
 
+  "results": {
+    "status_map": {}
+  },
+
   "migration": {
     "allow_existing_target": false
   },
@@ -49,6 +53,7 @@
     "mappings_file": "mappings.json",
     "resume": false,
     "skip_attachments": false,
+    "api_calls_per_minute": 600,
     "parallel_project_migration": true,
     "max_parallel_projects": 4,
     "show_project_progress": true,

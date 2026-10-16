@@ -104,6 +104,7 @@ def migrate_runs(
     source_runs_precached: Optional[List[Dict[str, Any]]] = None,
     progress: Optional["ProjectMigrationProgress"] = None,
     link_to_plan: bool = False,
+    environment_mapping: Optional[Dict[int, int]] = None,
 ) -> Dict[int, int]:
     """
     Migrate test runs from source to target workspace.
@@ -264,6 +265,48 @@ def migrate_runs(
             'description': run_dict.get('description', ''),
             'author_id': target_author_id,
         }
+
+        # Environment: the run payload carries the environment as an object, so
+        # match it to the target by slug first, then by title.
+        source_env = run_dict.get('environment')
+        if source_env and environment_mapping:
+            env_slug = None
+            env_title = None
+            if isinstance(source_env, dict):
+                env_slug = source_env.get('slug')
+                env_title = source_env.get('title')
+            elif isinstance(source_env, str):
+                env_title = source_env
+            else:
+                env_slug = getattr(source_env, 'slug', None)
+                env_title = getattr(source_env, 'title', None)
+            target_env_id = None
+            if env_slug:
+                target_env_id = environment_mapping.get(f"slug:{str(env_slug).lower()}")
+            if not target_env_id and env_title:
+                target_env_id = environment_mapping.get(f"title:{str(env_title).lower()}")
+            if target_env_id:
+                run_data_dict['environment_id'] = int(target_env_id)
+            else:
+                logger.warning(
+                    "Run %s references environment %r, which has no match in the "
+                    "target: the run is created without an environment",
+                    source_run_id,
+                    env_title or env_slug,
+                )
+
+        # Tags: RunCreate accepts them and they were being dropped silently.
+        source_tags = run_dict.get('tags') or []
+        run_tags = []
+        for tag in source_tags:
+            if isinstance(tag, str) and tag.strip():
+                run_tags.append(tag)
+            elif isinstance(tag, dict):
+                title = tag.get('title') or tag.get('name')
+                if title:
+                    run_tags.append(str(title))
+        if run_tags:
+            run_data_dict['tags'] = run_tags
         
         # Format and include start_time only if valid
         start_time_formatted = format_datetime(run_dict.get('start_time'))

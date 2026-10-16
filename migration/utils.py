@@ -8,7 +8,7 @@ import time
 import hashlib
 import uuid
 from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from qase.api_client_v1.exceptions import ApiException
 import requests
 
@@ -455,22 +455,27 @@ def format_datetime(dt: Any) -> Optional[str]:
     
     if isinstance(dt, str):
         try:
-            # Handle ISO 8601 format with timezone (e.g., "2026-01-13T13:31:55+00:00")
-            # Remove timezone info and parse
             dt_clean = dt.strip()
-            
-            # Remove timezone offset (e.g., "+00:00", "-05:00", or "Z")
+
+            # An offset must be CONVERTED, not discarded. Qase reads a naive
+            # timestamp as UTC and renders it in the viewer's timezone, so
+            # dropping "+01:00" and sending the wall clock moves the instant by
+            # an hour: a run started 07:43 in Oslo showed as 08:43 in the target.
+            try:
+                aware = datetime.fromisoformat(dt_clean.replace('Z', '+00:00'))
+                if aware.tzinfo is not None:
+                    return aware.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                pass
+
+            # No offset to honour: parse the wall clock as written.
             if dt_clean.endswith('Z'):
                 dt_clean = dt_clean[:-1]
             elif '+' in dt_clean:
-                # Split on '+' to remove timezone offset
                 dt_clean = dt_clean.split('+')[0]
             elif '-' in dt_clean and dt_clean.count('-') > 2:
-                # Handle negative timezone (e.g., "2026-01-13T13:31:55-05:00")
-                # Find the last '-' that's part of the timezone
                 parts = dt_clean.rsplit('-', 2)
                 if len(parts) == 3 and ':' in parts[2]:
-                    # Last part is timezone, remove it
                     dt_clean = '-'.join(parts[:2])
             
             # Try parsing various formats (order matters - try more specific first)

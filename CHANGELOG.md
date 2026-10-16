@@ -6,6 +6,44 @@ Notable changes to this migration, newest first. Versions follow
 capability that needs no action from you, and a **patch** means fixes and
 documentation.
 
+## 1.2.0 (2026-10-16)
+
+### Fixed
+- **A project whose test cases did not all migrate no longer has its runs and
+  results migrated against them.** Previously the run continued, and every result
+  whose case was missing was given a stand-in case ("Automated Test 123"): one
+  project ended up with 5,238 stand-ins against 399 real test cases, with every
+  run pointing at those instead of the real ones. The migration now stops that
+  project, says how many cases are missing, and tells you to re-run it.
+- **Custom fields that exist in the target but are not enabled for the project
+  being migrated are now enabled automatically.** Using one that is not enabled
+  made the API reject the whole batch of 20 test cases with
+  `The field name is not valid`, so cases went missing in blocks. If the field
+  cannot be updated, the run says which one and which projects to enable it for.
+- **Test runs keep their environment.** The environment was never sent, so every
+  migrated run showed none. Environments whose host is empty also no longer fail
+  to migrate.
+- **Test runs keep their tags.** They were never sent.
+- **Timestamps no longer shift.** A timezone offset was being discarded rather
+  than converted, so a run started 07:43 in Oslo arrived as 08:43.
+- **Retest and In progress results keep their status.** Both were being turned
+  into Blocked, although Qase accepts them.
+- **Test plans that cannot be migrated are reported.** A plan whose cases are
+  missing was skipped with only a line in the log file; it is now an error in the
+  run report, naming the plan.
+- Rate limiting: the results step now waits exactly as long as the API asks
+  instead of guessing.
+
+### Added
+- `results.status_map` maps a custom source status onto one Qase accepts, for
+  example `{"Passed with comment": "passed"}`. Qase has a fixed set of result
+  statuses, so a custom one has to land on one of them. Anything unmapped is
+  migrated as `skipped` and reported by name, rather than changed silently.
+- `options.api_calls_per_minute` sets the pacing of the attachment step, now
+  defaulting to 600 per minute rather than 1000. Qase allows 1000 per minute on
+  Enterprise and 600 on other plans, and pacing above your real limit only turns
+  throughput into rate-limit retries.
+
 ## 1.1.1 (2026-10-15)
 
 ### Fixed

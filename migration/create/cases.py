@@ -380,6 +380,12 @@ def migrate_cases(
     batch_size = limit
     total_cases_processed = len(all_source_cases)
 
+    # Recorded so the orchestrator can tell whether this project's cases are
+    # complete before it migrates runs and results against them.
+    if not hasattr(mappings, 'source_case_counts'):
+        mappings.source_case_counts = {}
+    mappings.source_case_counts[project_code_source] = total_cases_processed
+
     # Cases migrated by a previous run are reused, not created a second time.
     existing = dict(mappings.cases.get(project_code_source, {}))
     for case_dict in all_source_cases:
