@@ -658,6 +658,46 @@ _STATUS_OVERRIDES: Dict[str, str] = {}
 _UNMAPPED_STATUSES_SEEN: set = set()
 
 
+# Results that could not be attached to a migrated test case. Split by whether
+# the source result named a case at all, because the two mean different things:
+# a named-but-unmatched case points at a mapping problem on our side, while a
+# result with no case is the documented unlinked-results case.
+_UNMATCHED_WITH_CASE_ID: List[Any] = []
+_UNMATCHED_NO_CASE_ID: List[Any] = []
+
+
+def reset_unmatched_result_counters() -> None:
+    _UNMATCHED_WITH_CASE_ID.clear()
+    _UNMATCHED_NO_CASE_ID.clear()
+
+
+def report_unmatched_results(project_code_source: str, stats: Any = None) -> None:
+    """Say, once per project, how many results lost their test case and why."""
+    named = list(_UNMATCHED_WITH_CASE_ID)
+    unnamed = list(_UNMATCHED_NO_CASE_ID)
+    if named:
+        sample = ", ".join(str(c) for c in sorted(set(named))[:10])
+        message = (
+            f"{len(named)} result(s) in {project_code_source} reference a source test "
+            f"case that was not found in the migrated set, so Qase created a stand-in "
+            f"case for each (\"Automated Test <id>\"). Source case ids include: {sample}. "
+            f"These cases exist in the source, so this is a mapping problem rather than "
+            f"deleted cases."
+        )
+        logger.error(message)
+        if stats is not None and hasattr(stats, "add_error"):
+            stats.add_error("results", message)
+    if unnamed:
+        logger.warning(
+            "%s result(s) in %s carry no test case at all, usually automated runs "
+            "whose case was deleted in the source. Each becomes a stand-in case. "
+            "This is the documented unlinked-results behaviour.",
+            len(unnamed),
+            project_code_source,
+        )
+    reset_unmatched_result_counters()
+
+
 def set_status_overrides(overrides: Optional[Dict[str, str]]) -> None:
     """Load `results.status_map` once at the start of the results phase."""
     _STATUS_OVERRIDES.clear()
@@ -1582,6 +1622,15 @@ def _build_batch_rows_for_source_run(
             target_case_id = case_mapping.get(source_case_id)
 
         if target_case_id is None:
+            if source_case_id is not None:
+                # The result names a case that the case step should have
+                # migrated. Qase will create a stand-in case for it, so the
+                # result survives but is detached from the real one. Worth an
+                # error: this is the shape of a mapping bug, not of a result
+                # whose case was deleted in the source.
+                _UNMATCHED_WITH_CASE_ID.append(source_case_id)
+            else:
+                _UNMATCHED_NO_CASE_ID.append(result_dict.get("id"))
             _trace_event(
                 "result_standalone_no_testops_id",
                 project_source=project_code_source,
@@ -1909,6 +1958,10 @@ def migrate_results(
     runs_api_target = RunsApi(target_service.client)
     result_hash_mapping: Dict[str, str] = {}
 
+    # Per project, so one project's unmatched ids are never reported against
+    # another's (projects can run in parallel).
+    reset_unmatched_result_counters()
+
     author_uuid_to_id_mapping = extract_authors(source_service)
     mappings.author_uuid_to_id_mapping = author_uuid_to_id_mapping
 
@@ -2067,5 +2120,9 @@ def migrate_results(
     if project_code_source not in mappings.result_hashes:
         mappings.result_hashes[project_code_source] = {}
     mappings.result_hashes[project_code_source].update(result_hash_mapping)
+
+    # Say how many results lost their test case, so a project full of stand-in
+    # cases is visible in the report rather than only on screen.
+    report_unmatched_results(project_code_source, stats)
 
     return result_hash_mapping

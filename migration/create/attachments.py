@@ -627,6 +627,18 @@ def _download_batch_parallel(
                 continue
             if content and filename:
                 out.append((src_hash, filename, content))
+            else:
+                # Previously dropped in silence, which is how a run could report
+                # 119 of 386 attachments missing with nothing in the log to
+                # explain it. The underlying cause is logged by
+                # download_attachment at debug level; this line is the one that
+                # reaches the report.
+                logger.warning(
+                    "Attachment %s could not be downloaded from the source and "
+                    "was not migrated (no content returned). Run with "
+                    "logging.level debug for the API response behind it.",
+                    src_hash[:12] if isinstance(src_hash, str) else src_hash,
+                )
     return out
 
 
@@ -832,6 +844,16 @@ def migrate_attachments_workspace(
     # Attachments already uploaded by a previous run, or already present in the
     # target, are part of the migration too; only genuinely failed ones are missing.
     reused = skipped_already_migrated_count + skipped_existing_count
+    attachments_missing = total_unique_attachments - (migrated_count + reused)
+    if attachments_missing > 0:
+        logger.error(
+            "%s of %s attachments did not migrate. The cases, results and defects "
+            "that referenced them keep their text but lose the file. The warnings "
+            "above name each one.",
+            attachments_missing,
+            total_unique_attachments,
+        )
+
     stats.add_entity('attachments', total_unique_attachments, migrated_count + reused)
     stats.add_reused('attachments', reused)
     

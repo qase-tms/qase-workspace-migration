@@ -6,6 +6,23 @@ Notable changes to this migration, newest first. Versions follow
 capability that needs no action from you, and a **patch** means fixes and
 documentation.
 
+## 1.3.1 (2026-10-16)
+
+### Fixed
+- **Attachments that fail to download are no longer dropped in silence.** A
+  download that came back empty was skipped without a single line in the log, and
+  the failure behind it was only written at debug level. That is how a run could
+  report "119 of 386 attachments missing" with nothing to explain it. Each one
+  now logs a warning, and the step ends with one line stating the shortfall and
+  what it means for the cases and results that referenced those files.
+- **Results that lose their test case are now reported.** Where a result names a
+  source test case that was not found among the migrated ones, Qase creates a
+  stand-in case ("Automated Test 123") and the result is detached from the real
+  case. The run now reports this as an error, with the source case ids involved,
+  rather than leaving you to spot it in the UI. Results that carry no test case
+  at all are reported separately as a warning, since that is the documented
+  unlinked-results behaviour and means something quite different.
+
 ## 1.3.0 (2026-10-16)
 
 ### Fixed
