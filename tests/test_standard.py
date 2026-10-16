@@ -685,8 +685,21 @@ def test_statuses_the_api_accepts_are_not_downgraded():
         assert _map_v2_run_execution_status(status) == status
     # the API rejects a space, so normalise it
     assert _map_v2_run_execution_status("in progress") == "in_progress"
-    # genuinely unknown still has to land somewhere valid
-    assert _map_v2_run_execution_status("Passed with comment") == "skipped"
+    # A custom status is passed through, because the API accepts statuses the
+    # target workspace defines. If the target does not have it, the send path
+    # retries that one result with the fallback.
+    assert _map_v2_run_execution_status("Passed with comment") == "passed_with_comment"
+    from migration.create.results import status_fallback_for, set_status_overrides
+
+    assert status_fallback_for("Passed with comment") == "skipped"
+    set_status_overrides({"Passed with comment": "passed"})
+    try:
+        # with a mapping configured, that is where it goes, both on the way out
+        # and in the fallback
+        assert _map_v2_run_execution_status("Passed with comment") == "passed"
+        assert status_fallback_for("passed-with-comment") == "passed"
+    finally:
+        set_status_overrides({})
 
 
 def test_custom_status_map_from_config():

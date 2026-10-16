@@ -6,6 +6,22 @@ Notable changes to this migration, newest first. Versions follow
 capability that needs no action from you, and a **patch** means fixes and
 documentation.
 
+## 1.3.0 (2026-10-16)
+
+### Fixed
+- **Custom result statuses are now preserved where the target workspace has
+  them.** 1.2.0 reported them instead of changing them silently, but still sent
+  every custom status as `skipped`, so recreating a status in the target
+  workspace made no difference. The status is now sent as it is, which works when
+  the target defines the same one under Workspace settings > Fields > Result
+  status. If the target does not have it, that single result is retried with the
+  status from `results.status_map`, or `skipped` if you have not set one, so an
+  unknown status costs one changed result rather than a rejected batch.
+- `results.status_map` entries now match loosely, so `Passed with comment`,
+  `passed-with-comment` and `passed_with_comment` are the same entry. Previously
+  a mapping written with spaces never matched the status as the API names it,
+  which meant a configured mapping was ignored.
+
 ## 1.2.1 (2026-10-16)
 
 ### Documentation

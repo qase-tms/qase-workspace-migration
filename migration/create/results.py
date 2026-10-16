@@ -663,8 +663,18 @@ def set_status_overrides(overrides: Optional[Dict[str, str]]) -> None:
     _STATUS_OVERRIDES.clear()
     _UNMAPPED_STATUSES_SEEN.clear()
     for source_status, target_status in (overrides or {}).items():
-        mapped = _map_v2_run_execution_status(str(target_status))
-        _STATUS_OVERRIDES[str(source_status).strip().lower()] = mapped
+        # Keys are slugs, so "Passed with comment", "passed-with-comment" and
+        # "passed_with_comment" all match the same entry.
+        target_slug = _normalise_status_slug(str(target_status))
+        if target_slug not in V2_EXECUTION_STATUSES:
+            logger.warning(
+                "results.status_map sends %r to %r, which is not one of Qase's "
+                "built-in statuses. Results will only keep it if the target "
+                "workspace defines it.",
+                source_status,
+                target_status,
+            )
+        _STATUS_OVERRIDES[_normalise_status_slug(str(source_status))] = target_slug
 
 
 def _note_unmapped_status(raw: str, fell_back_to: str) -> None:
@@ -673,9 +683,11 @@ def _note_unmapped_status(raw: str, fell_back_to: str) -> None:
         return
     _UNMAPPED_STATUSES_SEEN.add(key)
     logger.warning(
-        "Result status %r has no equivalent in Qase and was migrated as %r. "
-        "Set results.status_map in the config to choose where it lands, "
-        "for example {\"%s\": \"passed\"}.",
+        "Result status %r is not one of Qase's built-in statuses. It is sent as "
+        "is, which works when the same status exists in the target workspace "
+        "(Workspace settings > Fields > Result status). Where the target does "
+        "not have it, those results are migrated as %r instead; set "
+        "results.status_map to choose, for example {\"%s\": \"passed\"}.",
         raw,
         fell_back_to,
         raw,
@@ -694,8 +706,8 @@ def _resolve_result_status_string(result_dict: Dict[str, Any]) -> str:
     status_str = result_dict.get("status", "").lower() if result_dict.get("status") else None
 
     raw_status = result_dict.get("status") or result_dict.get("status_text")
-    if raw_status and str(raw_status).strip().lower() in _STATUS_OVERRIDES:
-        return _STATUS_OVERRIDES[str(raw_status).strip().lower()]
+    if raw_status and _normalise_status_slug(str(raw_status)) in _STATUS_OVERRIDES:
+        return _STATUS_OVERRIDES[_normalise_status_slug(str(raw_status))]
 
     if status_id is not None and status_id in status_map:
         return status_map[status_id]
@@ -730,12 +742,34 @@ V2_EXECUTION_STATUSES = frozenset(
 )
 
 
+def _normalise_status_slug(core: str) -> str:
+    """A status name in the form the API uses: lower case, words joined by _."""
+    return (core or "skipped").lower().strip().replace(" ", "_").replace("-", "_")
+
+
 def _map_v2_run_execution_status(core: str) -> str:
-    """ResultExecution.status, normalised to what the v2 API accepts."""
-    c = (core or "skipped").lower().strip().replace(" ", "_").replace("-", "_")
+    """
+    ResultExecution.status.
+
+    The API accepts its eight built-in statuses plus any custom status defined
+    in the target workspace, so a name we do not recognise is passed through
+    rather than flattened to "skipped". If the target has no such status the
+    request is rejected, and `_send_chunk` retries that result with
+    `status_fallback_for`, so an unknown status costs one downgraded result
+    instead of the whole batch.
+    """
+    c = _normalise_status_slug(core)
     if c in V2_EXECUTION_STATUSES:
         return c
-    return "skipped"
+    override = _STATUS_OVERRIDES.get(c)
+    if override:
+        return override
+    return c
+
+
+def status_fallback_for(status: str) -> str:
+    """Where a status the target rejected should land instead."""
+    return _STATUS_OVERRIDES.get(_normalise_status_slug(status), "skipped")
 
 
 def _map_step_status_v2(val: Any) -> ResultStepStatus:
@@ -1774,6 +1808,43 @@ def _migrate_results_one_source_run(
             and 400 <= http_status < 500
             and http_status not in (408, 429)
         )
+
+        # A single result the target rejects because of its status: the status
+        # is custom and this workspace does not define it. Downgrade that one
+        # result rather than dropping it.
+        if deterministic and len(chunk_rows) == 1:
+            only = results_list[0]
+            current = getattr(getattr(only, "execution", None), "status", None)
+            if current and _normalise_status_slug(current) not in V2_EXECUTION_STATUSES:
+                fallback = status_fallback_for(current)
+                logger.warning(
+                    "Run %s: the target does not have the status %r, migrating "
+                    "that result as %r instead",
+                    target_run_id,
+                    current,
+                    fallback,
+                )
+                only.execution.status = fallback
+                retry_ok, _ = _create_results_v2_with_retry(
+                    results_api_v2,
+                    project_code_target,
+                    int(target_run_id),
+                    CreateResultsRequestV2(results=[only]),
+                    trace=trace,
+                    trace_ctx={
+                        "project_source": project_code_source,
+                        "source_run_id": source_run_id,
+                        "chunk_index": f"{chunk_label}-status-fallback",
+                        "chunk_size": 1,
+                    },
+                    full_payloads=trace_full,
+                )
+                if retry_ok:
+                    created += 1
+                    if progress:
+                        progress.add_results(1)
+                    return
+
         if deterministic and len(chunk_rows) > 1:
             mid = len(chunk_rows) // 2
             logger.warning(

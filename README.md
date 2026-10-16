@@ -216,7 +216,7 @@ Then edit `config.json`. Every key is listed below. `config.json` is gitignored;
 
 | Key | Required | Default | Description |
 |---|---|---|---|
-| `status_map` | No | `{}` | Where a custom source status lands, for example `{"Passed with comment": "passed", "Needs retest": "retest"}`. Qase accepts only `passed`, `failed`, `blocked`, `skipped`, `invalid`, `untested`, `retest` and `in_progress`, so a custom status has to map onto one of those. Anything unmapped is migrated as `skipped` and reported by name in the run report. |
+| `status_map` | No | `{}` | Where a custom source status lands, for example `{"Passed with comment": "passed", "Needs retest": "retest"}`. A custom status is **sent as it is first**, which works when the target workspace defines the same status under **Workspace settings > Fields > Result status**. Where the target does not have it, the result is migrated with the status named here, or as `skipped` if you have not named one, and the run report says which statuses were changed. Keys match loosely, so `Passed with comment`, `passed-with-comment` and `passed_with_comment` are the same entry. |
 **`migration`**
 
 | Key | Required | Default | Purpose |
