@@ -6,6 +6,16 @@ Notable changes to this migration, newest first. Versions follow
 capability that needs no action from you, and a **patch** means fixes and
 documentation.
 
+## 1.2.1 (2026-10-16)
+
+### Documentation
+- Three limits of the Qase API are now written down in the README, having only
+  been discovered when a customer hit them: a **defect's creation date** cannot be
+  set, so migrated defects carry the migration date; **defect IDs** cannot be set,
+  so they are renumbered in the target; and an **assignee** cannot be set
+  anywhere, on defects, on the member shown per case inside a run, or on a plan's
+  cases. Authors are migrated where the API allows it.
+
 ## 1.2.0 (2026-10-16)
 
 ### Fixed

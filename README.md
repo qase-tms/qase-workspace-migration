@@ -66,6 +66,9 @@ These are limits of the public API or deliberate trade-offs. Read them before pl
 | **Rejected case batches** | Cases are created in batches of 20, and the API rejects a whole batch if one case is invalid. The report names the affected source case ids |
 | **Estimated time on cases** | The bulk case API has no estimate field |
 | **Milestone creation date** | The API does not accept one; the migration date is used |
+| **Defect creation date** | The API does not accept one either, so migrated defects carry the migration date rather than the original |
+| **Defect IDs** | IDs cannot be set when creating, so defects are renumbered in the target. Anything referring to an old ID, in text, comments or external links, will not match |
+| **Assignees** | The API cannot set an assignee anywhere: not on defects, not on the member shown per case inside a run, and not on a plan's cases. They read back but cannot be written. **Authors** are migrated where the API allows it, on cases, runs and defects; results have no author field at all |
 | **Authors** | An author with no matching user in the target is attributed to `users.default` |
 
 ### Test plans and test runs
