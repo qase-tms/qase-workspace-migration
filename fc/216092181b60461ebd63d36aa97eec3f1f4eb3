@@ -1,0 +1,60 @@
+CHANGELOG.md
+  s_5f5a7d0713d585::t_7f729cc256cf13 9-46
+migration/utils.py
+  s_5f5a7d0713d585::t_29fa4a44caea1c 11,459-471
+migration/create/cases.py
+  s_5f5a7d0713d585::t_15e35d2f7857e2 383-388
+migration/create/attachments.py
+  s_5f5a7d0713d585::t_da0cdf87d1c6bb 44-58
+migration/create/runs.py
+  s_5f5a7d0713d585::t_277bc64c8c4b72 107,268-309
+migration/create/results.py
+  s_5f5a7d0713d585::t_da0cdf87d1c6bb 43-49,1232-1235
+  s_5f5a7d0713d585::t_7bd874fd9f6b4b 652-684,696-699,720,725-732,734-736
+migration/run_single_project.py
+  s_5f5a7d0713d585::t_a1b25e8309b7b5 40-56,238-279
+  s_5f5a7d0713d585::t_acd84f334643b3 314-316
+README.md
+  s_5f5a7d0713d585::t_d15296b81d289f 230
+  s_5f5a7d0713d585::t_01d8999b618996 211-216
+config.example.json
+  s_5f5a7d0713d585::t_01d8999b618996 44-47,56
+migration/create/custom_fields.py
+  s_5f5a7d0713d585::t_e2423f96b47d47 161
+  s_5f5a7d0713d585::t_74741bfd182311 7-11,65-68,81-82,143-160,162-179,251-257,307-308,329-331
+VERSION
+  s_5f5a7d0713d585::t_7f729cc256cf13 1
+migration/create/environments.py
+  s_5f5a7d0713d585::t_e24c95d0a1145d 44-62,70-72
+  s_5f5a7d0713d585::t_acd84f334643b3 118
+start.py
+  s_5f5a7d0713d585::t_5d91d7d2098ca2 179-184
+  s_5f5a7d0713d585::t_bef033ca041b68 185-187
+  s_5f5a7d0713d585::t_ca37cd9accd776 422-423
+migration/create/plans.py
+  s_5f5a7d0713d585::t_2c6c9b571d00b4 76-90
+tests/test_standard.py
+  s_5f5a7d0713d585::t_c2f08be5c0857f 730-732
+  s_5f5a7d0713d585::t_f3a242c11274b4 744-748
+  s_5f5a7d0713d585::t_57b115a9d2b538 742
+  s_5f5a7d0713d585::t_36f3587e51899d 652-729,733-741,743,749-761
+migration/utils/__init__.py
+  s_5f5a7d0713d585::t_c1601ad4a487da 31-32
+  s_5f5a7d0713d585::t_4ac04aba52f3e4 60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fc216092181b60461ebd63d36aa97eec3f1f4eb3",
+  "prompts": {},
+  "sessions": {
+    "s_5f5a7d0713d585": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1da653ca-9573-43c7-aced-d7ae4d80d5fa",
+        "model": "claude-opus-5"
+      },
+      "human_author": "rmontemor-qase <rmontemor@qase.io>"
+    }
+  }
+}
