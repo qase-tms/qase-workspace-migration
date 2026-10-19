@@ -685,10 +685,11 @@ def test_statuses_the_api_accepts_are_not_downgraded():
         assert _map_v2_run_execution_status(status) == status
     # the API rejects a space, so normalise it
     assert _map_v2_run_execution_status("in progress") == "in_progress"
-    # A custom status is passed through, because the API accepts statuses the
-    # target workspace defines. If the target does not have it, the send path
-    # retries that one result with the fallback.
-    assert _map_v2_run_execution_status("Passed with comment") == "passed_with_comment"
+    # A custom status is passed through with the spelling the source used: a
+    # workspace whose status is "passed-with-comment" does not recognise
+    # "passed_with_comment", which is what normalising before sending produced.
+    assert _map_v2_run_execution_status("passed-with-comment") == "passed-with-comment"
+    assert _map_v2_run_execution_status("Passed with comment") == "Passed with comment"
     from migration.create.results import status_fallback_for, set_status_overrides
 
     assert status_fallback_for("Passed with comment") == "skipped"
@@ -847,3 +848,33 @@ def test_unmatched_results_split_mapping_problems_from_deleted_cases(caplog):
     assert "5" in errors[0] and "801" not in errors[0]
     assert "no longer exist in the source" in joined
     assert "unlinked-results" in joined
+
+
+def test_result_times_are_sent_and_clamped_to_the_run():
+    """
+    Qase shows a run's case status from the most recent result, so a retried
+    case displayed the wrong attempt while results carried no times. The API
+    also rejects a result dated before its run, so times outside the window are
+    left off rather than sent and refused.
+    """
+    from migration.create.results import _result_epoch_seconds, _source_to_result_create_v2
+
+    assert _result_epoch_seconds({"end_time": "2026-02-09T07:30:00+00:00"}) == 1770622200.0
+    assert _result_epoch_seconds({}) is None
+
+    mappings = SimpleNamespace(
+        target_workspace_hash=None, default_user_id=1, get_user_id=lambda _u: 1,
+        user_uuid_mapping={},
+    )
+    inside = {"case_id": 5, "status": "passed", "end_time": "2026-02-09T07:30:00+00:00",
+              "time_spent_ms": 2000, "title": "t"}
+    run_start = 1770620400.0  # 07:00, before the result
+
+    rc = _source_to_result_create_v2(inside, 5, mappings, {}, {}, run_start_epoch=run_start)
+    assert rc.execution.end_time == 1770622200.0
+    assert rc.execution.start_time == 1770622200.0 - 2.0, "start is end minus the duration"
+
+    # a result older than its run would be refused, so no times are sent
+    before = dict(inside, end_time="2026-02-09T06:00:00+00:00")
+    rc2 = _source_to_result_create_v2(before, 5, mappings, {}, {}, run_start_epoch=run_start)
+    assert rc2.execution.start_time is None and rc2.execution.end_time is None

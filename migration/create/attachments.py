@@ -2,6 +2,7 @@
 Create attachments in target Qase workspace.
 """
 import logging
+import mimetypes
 import os
 import re
 import sys
@@ -13,7 +14,7 @@ import requests
 from migration import qase_http
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from typing import Dict, Set, List, Any, Optional, Tuple
 from tqdm import tqdm
 from qase.api_client_v1.api.attachments_api import AttachmentsApi
@@ -73,7 +74,9 @@ def _try_download_markdown_url(
     filename = filename_hint
     if not filename:
         parsed = urlparse(markdown_url)
-        url_filename = os.path.basename(parsed.path)
+        # The path is percent-encoded, so without decoding a file called
+        # "my screenshot.png" arrives as "my%20screenshot.png".
+        url_filename = unquote(os.path.basename(parsed.path))
         if url_filename and url_filename != "/":
             filename = url_filename
     try:
@@ -90,7 +93,7 @@ def _try_download_markdown_url(
             if url_response.status_code == 200:
                 if not filename:
                     parsed = urlparse(markdown_url)
-                    filename = os.path.basename(parsed.path) or f"attachment_{attachment_hash[:8]}.bin"
+                    filename = unquote(os.path.basename(parsed.path)) or f"attachment_{attachment_hash[:8]}.bin"
                 return url_response.content, filename
     except Exception:
         pass
@@ -145,6 +148,12 @@ def _maybe_capture_workspace_hash_from_upload_result(mappings: MigrationMappings
     scan(data)
 
 
+def _media_type_for(filename: Optional[str]) -> str:
+    """Media type from the file's name, falling back to a generic binary type."""
+    guessed, _ = mimetypes.guess_type(filename or "")
+    return guessed or "application/octet-stream"
+
+
 def _upload_files_http(
     target_service: QaseService,
     project_code: str,
@@ -162,8 +171,11 @@ def _upload_files_http(
     url = f"{base}/attachment/{project_code}"
     token = target_service.api_token
     headers = {"Token": token, "accept": "application/json"}
+    # Every file used to be uploaded as application/octet-stream, so Qase could
+    # not tell an image from a zip and showed no preview. Derive the type from
+    # the filename instead.
     multipart = [
-        ("file[]", (fn or "file.bin", content, "application/octet-stream"))
+        ("file[]", (fn or "file.bin", content, _media_type_for(fn)))
         for fn, content in named_files
     ]
     last_exc: Optional[Exception] = None
@@ -538,7 +550,7 @@ def download_attachment(
                 file_content = url_response.content
                 if not filename:
                     parsed = urlparse(markdown_url)
-                    filename = os.path.basename(parsed.path) or f"attachment_{attachment_hash[:8]}.bin"
+                    filename = unquote(os.path.basename(parsed.path)) or f"attachment_{attachment_hash[:8]}.bin"
             elif url_response.status_code == 403:
                 headers = {'Token': source_service.api_token}
                 url_response = qase_http.get(markdown_url, headers=headers, timeout=60)

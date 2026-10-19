@@ -6,6 +6,32 @@ Notable changes to this migration, newest first. Versions follow
 capability that needs no action from you, and a **patch** means fixes and
 documentation.
 
+## 1.5.0 (2026-10-19)
+
+### Fixed
+- **Custom result statuses keep the spelling your workspace uses.** 1.3.0 sent
+  them with spaces and hyphens converted to underscores, so a workspace whose
+  status is `passed-with-comment` was asked for `passed_with_comment` and did not
+  recognise it. Recreating the status in the target then appeared to make no
+  difference. The source's own spelling is now sent.
+- **Results carry the time they actually ran.** They were migrated without any
+  timestamp, so every result was stamped at migration time. Qase shows a run's
+  case status from the most recent result, so a case that had been retried could
+  display the wrong attempt, Retest where the source said Passed. Times outside
+  the run's own window are left off, because the API rejects a result dated
+  before its run.
+- **Images show a preview again, and file names are readable.** Every attachment
+  was uploaded as `application/octet-stream`, so Qase could not tell an image
+  from an archive and showed no preview. The type is now taken from the file
+  name. Names taken from a URL are also decoded, so a file called
+  `my screenshot.png` no longer arrives as `my%20screenshot.png`.
+
+### Documentation
+- Three limits now written down: the **order of cases inside a suite** cannot be
+  set (the suite tree itself is migrated correctly), a completed run shows the
+  **migration date as its finish time**, and a case that gained **parameters
+  after a run** can appear more than once in that run.
+
 ## 1.4.0 (2026-10-16)
 
 ### Fixed

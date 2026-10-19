@@ -14,6 +14,7 @@ prefix). ``relations.suite`` mirrors the source case suite path
 when the API exposes it (e.g. ``suite_title`` or ``suite``).
 """
 import logging
+from datetime import datetime, timezone
 import os
 import re
 import threading
@@ -45,6 +46,7 @@ from migration.utils import (
     MigrationStats,
     _retry_after_seconds,
     chunks,
+    retry_with_backoff,
     to_dict,
 )
 from migration.extract.results import ResultsFetchError, extract_results, fetch_result_detail_json
@@ -831,20 +833,20 @@ def _map_v2_run_execution_status(core: str) -> str:
     """
     ResultExecution.status.
 
-    The API accepts its eight built-in statuses plus any custom status defined
-    in the target workspace, so a name we do not recognise is passed through
-    rather than flattened to "skipped". If the target has no such status the
-    request is rejected, and `_send_chunk` retries that result with
-    `status_fallback_for`, so an unknown status costs one downgraded result
-    instead of the whole batch.
+    The API accepts its eight built-in statuses plus any custom status the
+    target workspace defines. A custom status is sent with the spelling the
+    source gave it: a workspace whose status is "passed-with-comment" does not
+    recognise "passed_with_comment", so normalising before sending broke exactly
+    the case this is meant to support. The slug form is used for matching only.
     """
-    c = _normalise_status_slug(core)
+    raw = (core or "skipped").strip()
+    c = _normalise_status_slug(raw)
     if c in V2_EXECUTION_STATUSES:
         return c
     override = _STATUS_OVERRIDES.get(c)
     if override:
         return override
-    return c
+    return raw
 
 
 def status_fallback_for(status: str) -> str:
@@ -1196,12 +1198,36 @@ def _resolve_result_display_title(
     return _placeholder_automated_test_title(result_dict, target_case_id)
 
 
+def _result_epoch_seconds(result_dict: Dict[str, Any]) -> Optional[float]:
+    """
+    When the result finished, as epoch seconds, from whatever the source gives.
+
+    Qase shows a run's case status from the most recent result, so without these
+    a case that was retried can display the wrong attempt: its results all end up
+    stamped at migration time and the order stops meaning anything.
+    """
+    for key in ("end_time", "endTime", "finished_at", "completed_at", "created"):
+        raw = result_dict.get(key)
+        if not raw:
+            continue
+        try:
+            text = str(raw).strip().replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _source_to_result_create_v2(
     result_dict: Dict[str, Any],
     target_case_id: Optional[int],
     mappings: MigrationMappings,
     author_uuid_to_id_mapping: Dict[str, int],
     attachment_mapping: Dict[str, str],
+    run_start_epoch: Optional[float] = None,
 ) -> ResultCreate:
     """Build one API v2 ResultCreate from a v1-style result payload."""
     _coalesce_result_attachments(result_dict)
@@ -1218,9 +1244,23 @@ def _source_to_result_create_v2(
         if isinstance(stacktrace, str) and not stacktrace.strip():
             stacktrace = None
 
+    # The API rejects a result dated before its run started ("execution.start
+    # time must be at least ..."), so send times only when they sit inside the
+    # run's window and let Qase stamp the rest.
+    end_epoch = _result_epoch_seconds(result_dict)
+    start_epoch = None
+    if end_epoch is not None:
+        if duration_ms:
+            start_epoch = end_epoch - (duration_ms / 1000.0)
+        else:
+            start_epoch = end_epoch
+        if run_start_epoch is not None and start_epoch < run_start_epoch:
+            start_epoch = None
+            end_epoch = None
+
     execution = ResultExecution(
-        start_time=None,
-        end_time=None,
+        start_time=start_epoch,
+        end_time=end_epoch,
         status=_map_v2_run_execution_status(core),
         duration=duration_ms,
         stacktrace=stacktrace,
@@ -1607,6 +1647,32 @@ def _augment_runs_to_complete_from_source_details(
         )
 
 
+def _target_run_start_epoch(
+    target_service: QaseService, project_code: str, run_id: int
+) -> Optional[float]:
+    """
+    When the target run starts, as epoch seconds.
+
+    A result dated before its run is rejected, so this is the floor for the
+    times we send. One GET per run; on any failure we simply send no times.
+    """
+    try:
+        runs_api = RunsApi(target_service.client)
+        resp = retry_with_backoff(runs_api.get_run, code=project_code, id=run_id)
+        result = getattr(resp, "result", None)
+        raw = getattr(result, "start_time", None) if result is not None else None
+        if not raw:
+            return None
+        text = str(raw).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except Exception as e:  # noqa: BLE001 - timing is a nicety, never a blocker
+        logger.debug("Could not read run %s start time: %s", run_id, e)
+        return None
+
+
 def _build_batch_rows_for_source_run(
     source_results: List[Any],
     *,
@@ -1623,6 +1689,7 @@ def _build_batch_rows_for_source_run(
     trace: Any,
     trace_full: bool,
     row_max_workers: int,
+    run_start_epoch: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     trace_lock = threading.Lock() if trace else None
 
@@ -1689,6 +1756,7 @@ def _build_batch_rows_for_source_run(
                 mappings,
                 author_uuid_to_id_mapping,
                 attachment_mapping,
+                run_start_epoch=run_start_epoch,
             )
             _trace_event(
                 "result_row_built",
@@ -1780,6 +1848,11 @@ def _migrate_results_one_source_run(
             n_raw_results=len(source_results),
         )
 
+    # The target run's start is the floor the API enforces on result times.
+    run_start_epoch = _target_run_start_epoch(
+        target_service, project_code_target, int(target_run_id)
+    )
+
     batch_rows = _build_batch_rows_for_source_run(
         source_results,
         source_service=source_service,
@@ -1795,6 +1868,7 @@ def _migrate_results_one_source_run(
         trace=trace,
         trace_full=trace_full,
         row_max_workers=row_max_workers,
+        run_start_epoch=run_start_epoch,
     )
 
     if not batch_rows:

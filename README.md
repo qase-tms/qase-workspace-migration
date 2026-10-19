@@ -70,6 +70,9 @@ These are limits of the public API or deliberate trade-offs. Read them before pl
 | **Defect IDs** | IDs cannot be set when creating, so defects are renumbered in the target. Anything referring to an old ID, in text, comments or external links, will not match |
 | **Assignees** | The API cannot set an assignee anywhere: not on defects, not on the member shown per case inside a run, and not on a plan's cases. They read back but cannot be written. **Authors** are migrated where the API allows it, on cases, runs and defects; results have no author field at all |
 | **Authors** | An author with no matching user in the target is attributed to `users.default` |
+| **Order of cases inside a suite** | The suite tree itself is migrated, parents and all, and every case lands in the right suite. What cannot be set is the **order of cases within a suite**: no case endpoint accepts a position, so cases appear in the order they were read from the source |
+| **Run "Finished at"** | A completed run shows the date the migration ran, not the original one. The finish time is accepted when the run is created, but completing a run overwrites it with the current time and `PATCH /run` has no field to set it back. A run can keep its real finish time or show as completed, not both, so the migration completes the run |
+| **Parameterised cases in old runs** | If a case gained parameters *after* a run was executed, that case can appear more than once in the migrated run. The migration creates the case as it is now, parameters included, and Qase expands a parameterised case in a run into one row per combination, while the original result has no parameters and lands on its own row. The API exposes no history, so the pre-parameter version of the case cannot be recreated |
 
 ### Test plans and test runs
 
