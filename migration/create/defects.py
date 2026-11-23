@@ -2,12 +2,15 @@
 Create defects in target Qase workspace.
 """
 import logging
-import re
 from typing import Dict, Any, List
 from qase_service import QaseService
 from migration.step_logging import step_log_info
 from migration.utils import MigrationMappings, MigrationStats, QaseRawApiClient
-from migration.transform.attachments import replace_attachment_hashes_in_text
+from migration.transform.attachments import (
+    as_attachment_list,
+    attachment_hash_from_url,
+    replace_attachment_hashes_in_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +159,7 @@ def migrate_defects(
                 pass
         
         target_attachments = []
-        source_attachments = defect_dict.get('attachments', [])
+        source_attachments = as_attachment_list(defect_dict.get('attachments'))
         if source_attachments and attachment_mapping:
             for att_item in source_attachments:
                 source_hash = None
@@ -165,9 +168,7 @@ def migrate_defects(
                 elif isinstance(att_item, dict):
                     source_hash = att_item.get('hash') or att_item.get('attachment_hash') or att_item.get('id')
                     if not source_hash and att_item.get('url'):
-                        match = re.search(r'/attachment/([a-f0-9]{32,64})/', att_item.get('url'), re.IGNORECASE)
-                        if match:
-                            source_hash = match.group(1)
+                        source_hash = attachment_hash_from_url(att_item.get('url'))
                 
                 if source_hash:
                     source_hash_str = str(source_hash).strip()
@@ -182,7 +183,10 @@ def migrate_defects(
         actual_result = defect_dict.get('actual_result', '')
         if attachment_mapping:
             target_workspace_hash = getattr(mappings, 'target_workspace_hash', None)
-            actual_result = replace_attachment_hashes_in_text(actual_result, attachment_mapping, target_workspace_hash)
+            actual_result = replace_attachment_hashes_in_text(
+                actual_result, attachment_mapping, target_workspace_hash,
+                getattr(mappings, 'attachment_urls', None),
+            )
         
         source_status = defect_dict.get('status')
         should_resolve = False

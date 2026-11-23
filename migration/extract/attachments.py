@@ -8,21 +8,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Set, List, Any, Tuple
 from qase.api_client_v1.api.cases_api import CasesApi
 from qase.api_client_v1.api.runs_api import RunsApi
-from qase.api_client_v1.api.results_api import ResultsApi
 from qase_service import QaseService
 from migration.utils import retry_with_backoff, extract_entities_from_response, to_dict
+from migration.extract.results import extract_results
 from migration.transform.attachments import (
+    as_attachment_list,
+    attachment_hash_from_url,
     extract_attachment_hashes_from_dict,
     extract_attachment_urls_from_dict
 )
 
 logger = logging.getLogger(__name__)
-
-_ATT_URL_RE = re.compile(
-    r"/attachments?/([a-f0-9]{32,64}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/",
-    re.IGNORECASE,
-)
-
 
 def _looks_like_hash(s: str) -> bool:
     t = str(s).strip().replace("-", "")
@@ -35,15 +31,14 @@ def _ingest_attachment_like_items(
     url_map: Dict[str, str],
 ) -> None:
     """Collect hashes from API attachment lists (including automated files/screenshots shapes)."""
-    if not isinstance(items, list):
-        return
-    for item in items:
+    for item in as_attachment_list(items):
         if isinstance(item, str):
             if _looks_like_hash(item):
                 all_hashes.add(str(item).replace("-", "").lower())
-            m = _ATT_URL_RE.search(item)
-            if m:
-                all_hashes.add(m.group(1).replace("-", "").lower())
+            hx = attachment_hash_from_url(item)
+            if hx:
+                all_hashes.add(hx)
+                url_map.setdefault(hx, item)
         elif isinstance(item, dict):
             d = to_dict(item)
             for k in ("hash", "attachment_hash", "attachmentHash", "file_hash", "fileHash", "uuid"):
@@ -55,12 +50,10 @@ def _ingest_attachment_like_items(
                 all_hashes.add(str(vid).replace("-", "").lower())
             for uk in ("url", "thumb_url", "thumbnail_url", "preview_url", "src", "file_url"):
                 u = d.get(uk)
-                if u:
-                    m = _ATT_URL_RE.search(str(u))
-                    if m:
-                        hx = m.group(1).replace("-", "").lower()
-                        all_hashes.add(hx)
-                        url_map.setdefault(hx, str(u))
+                hx = attachment_hash_from_url(u)
+                if hx:
+                    all_hashes.add(hx)
+                    url_map.setdefault(hx, str(u))
 
 
 def _ingest_nested_result_media(result_dict: Dict[str, Any], all_hashes: Set[str], url_map: Dict[str, str]) -> None:
@@ -108,18 +101,9 @@ def extract_attachment_hashes_from_cases(
                 case_dict = to_dict(case)
                 
                 # Case-level attachments
-                if case_dict.get('attachments'):
-                    for att_item in case_dict['attachments']:
-                        if isinstance(att_item, str):
-                            all_hashes.add(att_item.lower())
-                        elif isinstance(att_item, dict):
-                            if 'hash' in att_item:
-                                all_hashes.add(str(att_item['hash']).lower())
-                            elif 'url' in att_item:
-                                url = att_item['url']
-                                match = re.search(r'/attachment/([a-f0-9]{32,64})/', url, re.IGNORECASE)
-                                if match:
-                                    all_hashes.add(match.group(1).lower())
+                # With private attachments the objects carry no hash, only a
+                # signed url, so the hash has to come from the url.
+                _ingest_attachment_like_items(case_dict.get('attachments'), all_hashes, url_map)
                 
                 # Case text fields
                 case_text_fields = ['description', 'preconditions', 'postconditions']
@@ -163,6 +147,11 @@ def extract_attachment_hashes_from_cases(
                 break
             offset += limit
         except Exception as e:
+            logger.warning(
+                "Could not read cases of %s to collect attachments (offset %s): %s. "
+                "Attachments on the remaining cases will not be migrated.",
+                project_code, offset, e,
+            )
             break
     
     return all_hashes, url_map
@@ -179,7 +168,6 @@ def extract_attachment_hashes_from_results(
         Tuple of (set of hashes, dict of hash -> URL)
     """
     runs_api_source = RunsApi(source_service.client)
-    results_api_source = ResultsApi(source_service.client)
     all_hashes = set()
     url_map = {}
     offset = 0
@@ -202,118 +190,144 @@ def extract_attachment_hashes_from_results(
                 run_dict = to_dict(run)
                 run_id = run_dict.get('id')
                 
-                results_offset = 0
-                results_limit = 100
-                
-                while True:
-                    try:
-                        results_response = retry_with_backoff(
-                            results_api_source.get_results,
-                            code=project_code,
-                            run=str(run_id),
-                            limit=results_limit,
-                            offset=results_offset
+                # Raw HTTP, not the SDK: Qase can return a step's attachments as
+                # an object, {"1": {...}}, and the SDK then rejects the whole page.
+                try:
+                    results_entities = extract_results(
+                        source_service, project_code, run_id, strict=True
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Could not read results of run %s in %s to collect attachments: %s. "
+                        "Their attachments will not be migrated.",
+                        run_id, project_code, e,
+                    )
+                    results_entities = []
+
+                for result in results_entities:
+                    result_dict = to_dict(result)
+
+                    _ingest_nested_result_media(result_dict, all_hashes, url_map)
+
+                    # Result text fields (reporters put links in message / execution.comment)
+                    result_text_fields = [
+                        "comment",
+                        "message",
+                        "text",
+                        "stacktrace",
+                    ]
+                    result_text_hashes = extract_attachment_hashes_from_dict(
+                        result_dict, result_text_fields
+                    )
+                    result_text_urls = extract_attachment_urls_from_dict(
+                        result_dict, result_text_fields
+                    )
+                    all_hashes.update(result_text_hashes)
+                    url_map.update(result_text_urls)
+                    ex = result_dict.get("execution")
+                    if isinstance(ex, dict):
+                        exh = extract_attachment_hashes_from_dict(
+                            to_dict(ex), ["comment", "message", "stacktrace"]
                         )
-                        
-                        results_entities = extract_entities_from_response(results_response)
-                        if not results_entities:
-                            break
-                        
-                        for result in results_entities:
-                            result_dict = to_dict(result)
+                        exu = extract_attachment_urls_from_dict(
+                            to_dict(ex), ["comment", "message", "stacktrace"]
+                        )
+                        all_hashes.update(exh)
+                        url_map.update(exu)
 
-                            _ingest_nested_result_media(result_dict, all_hashes, url_map)
-
-                            # Result text fields (reporters put links in message / execution.comment)
-                            result_text_fields = [
-                                "comment",
-                                "message",
-                                "text",
-                                "stacktrace",
-                            ]
-                            result_text_hashes = extract_attachment_hashes_from_dict(
-                                result_dict, result_text_fields
-                            )
-                            result_text_urls = extract_attachment_urls_from_dict(
-                                result_dict, result_text_fields
-                            )
-                            all_hashes.update(result_text_hashes)
-                            url_map.update(result_text_urls)
-                            ex = result_dict.get("execution")
-                            if isinstance(ex, dict):
-                                exh = extract_attachment_hashes_from_dict(
-                                    to_dict(ex), ["comment", "message", "stacktrace"]
+                    # Result steps
+                    if result_dict.get('steps'):
+                        for step in result_dict['steps']:
+                            try:
+                                step_dict = to_dict(step) if not isinstance(step, dict) else step
+                                if isinstance(step_dict, dict):
+                                    _ingest_nested_result_media(step_dict, all_hashes, url_map)
+                                    inner = step_dict.get("data")
+                                    if isinstance(inner, dict):
+                                        _ingest_nested_result_media(
+                                            to_dict(inner), all_hashes, url_map
+                                        )
+                                    step_text_fields = [
+                                        "action",
+                                        "expected_result",
+                                        "comment",
+                                        "message",
+                                        "text",
+                                        "actual_result",
+                                    ]
+                                    step_text_hashes = extract_attachment_hashes_from_dict(
+                                        step_dict, step_text_fields
+                                    )
+                                    step_text_urls = extract_attachment_urls_from_dict(
+                                        step_dict, step_text_fields
+                                    )
+                                    valid_hashes = {h for h in step_text_hashes if isinstance(h, str)}
+                                    all_hashes.update(valid_hashes)
+                                    url_map.update(step_text_urls)
+                                    s_ex = step_dict.get("execution")
+                                    if isinstance(s_ex, dict):
+                                        sd = to_dict(s_ex)
+                                        _ingest_attachment_like_items(
+                                            sd.get("attachments"), all_hashes, url_map
+                                        )
+                                        _ingest_attachment_like_items(
+                                            sd.get("files"), all_hashes, url_map
+                                        )
+                                        _ingest_attachment_like_items(
+                                            sd.get("screenshots"), all_hashes, url_map
+                                        )
+                                        seh = extract_attachment_hashes_from_dict(
+                                            sd, ["comment", "message"]
+                                        )
+                                        seu = extract_attachment_urls_from_dict(
+                                            sd, ["comment", "message"]
+                                        )
+                                        all_hashes.update(seh)
+                                        url_map.update(seu)
+                            except Exception as e:
+                                logger.warning(
+                                    "Could not read a step of a result in run %s (%s): %s",
+                                    run_id, project_code, e,
                                 )
-                                exu = extract_attachment_urls_from_dict(
-                                    to_dict(ex), ["comment", "message", "stacktrace"]
-                                )
-                                all_hashes.update(exh)
-                                url_map.update(exu)
+                                continue
 
-                            # Result steps
-                            if result_dict.get('steps'):
-                                for step in result_dict['steps']:
-                                    try:
-                                        step_dict = to_dict(step) if not isinstance(step, dict) else step
-                                        if isinstance(step_dict, dict):
-                                            _ingest_nested_result_media(step_dict, all_hashes, url_map)
-                                            inner = step_dict.get("data")
-                                            if isinstance(inner, dict):
-                                                _ingest_nested_result_media(
-                                                    to_dict(inner), all_hashes, url_map
-                                                )
-                                            step_text_fields = [
-                                                "action",
-                                                "expected_result",
-                                                "comment",
-                                                "message",
-                                                "text",
-                                                "actual_result",
-                                            ]
-                                            step_text_hashes = extract_attachment_hashes_from_dict(
-                                                step_dict, step_text_fields
-                                            )
-                                            step_text_urls = extract_attachment_urls_from_dict(
-                                                step_dict, step_text_fields
-                                            )
-                                            valid_hashes = {h for h in step_text_hashes if isinstance(h, str)}
-                                            all_hashes.update(valid_hashes)
-                                            url_map.update(step_text_urls)
-                                            s_ex = step_dict.get("execution")
-                                            if isinstance(s_ex, dict):
-                                                sd = to_dict(s_ex)
-                                                _ingest_attachment_like_items(
-                                                    sd.get("attachments"), all_hashes, url_map
-                                                )
-                                                _ingest_attachment_like_items(
-                                                    sd.get("files"), all_hashes, url_map
-                                                )
-                                                _ingest_attachment_like_items(
-                                                    sd.get("screenshots"), all_hashes, url_map
-                                                )
-                                                seh = extract_attachment_hashes_from_dict(
-                                                    sd, ["comment", "message"]
-                                                )
-                                                seu = extract_attachment_urls_from_dict(
-                                                    sd, ["comment", "message"]
-                                                )
-                                                all_hashes.update(seh)
-                                                url_map.update(seu)
-                                    except Exception:
-                                        continue
-                        
-                        if len(results_entities) < results_limit:
-                            break
-                        results_offset += results_limit
-                    except Exception as e:
-                        break
-            
             if len(runs_entities) < limit:
                 break
             offset += limit
         except Exception as e:
+            logger.warning(
+                "Could not read runs of %s to collect attachments (offset %s): %s. "
+                "Attachments on the remaining runs will not be migrated.",
+                project_code, offset, e,
+            )
             break
     
+    return all_hashes, url_map
+
+
+def extract_attachment_hashes_from_shared_steps(
+    source_service: QaseService,
+    project_code: str
+) -> tuple[Set[str], Dict[str, str]]:
+    """Attachments on shared steps, including ones no case uses."""
+    from migration.extract.shared_steps import extract_shared_steps
+
+    all_hashes: Set[str] = set()
+    url_map: Dict[str, str] = {}
+    try:
+        shared_steps = extract_shared_steps(source_service, project_code)
+    except Exception as e:
+        logger.warning(
+            "Could not read shared steps of %s to collect attachments: %s", project_code, e
+        )
+        return all_hashes, url_map
+    for shared in shared_steps:
+        for step in to_dict(shared).get("steps") or []:
+            step_dict = to_dict(step)
+            _ingest_attachment_like_items(step_dict.get("attachments"), all_hashes, url_map)
+            fields = ["action", "expected_result", "data"]
+            all_hashes.update(extract_attachment_hashes_from_dict(step_dict, fields))
+            url_map.update(extract_attachment_urls_from_dict(step_dict, fields))
     return all_hashes, url_map
 
 
@@ -342,23 +356,7 @@ def extract_attachment_hashes_from_defects(
         defect_dict = to_dict(defect) if hasattr(defect, '__dict__') else defect
         
         # Defect-level attachments
-        if defect_dict.get('attachments'):
-            for att_item in defect_dict['attachments']:
-                if isinstance(att_item, str):
-                    all_hashes.add(att_item.lower())
-                elif isinstance(att_item, dict):
-                    if 'hash' in att_item:
-                        hash_val = str(att_item['hash']).lower()
-                        all_hashes.add(hash_val)
-                        if 'url' in att_item:
-                            url_map[hash_val] = att_item['url']
-                    elif 'url' in att_item:
-                        url = att_item['url']
-                        match = re.search(r'/attachment/([a-f0-9]{32,64})/', url, re.IGNORECASE)
-                        if match:
-                            hash_val = match.group(1).lower()
-                            all_hashes.add(hash_val)
-                            url_map[hash_val] = url
+        _ingest_attachment_like_items(defect_dict.get('attachments'), all_hashes, url_map)
         
         # Defect text fields (actual_result may contain attachment references)
         defect_text_fields = ['actual_result']
@@ -388,8 +386,9 @@ def _extract_attachment_hashes_for_one_project(
     case_hashes, case_urls = extract_attachment_hashes_from_cases(src, project_code_source)
     result_hashes, result_urls = extract_attachment_hashes_from_results(src, project_code_source)
     defect_hashes, defect_urls = extract_attachment_hashes_from_defects(src, project_code_source)
-    all_hashes = case_hashes | result_hashes | defect_hashes
-    all_urls = {**case_urls, **result_urls, **defect_urls}
+    shared_hashes, shared_urls = extract_attachment_hashes_from_shared_steps(src, project_code_source)
+    all_hashes = case_hashes | result_hashes | defect_hashes | shared_hashes
+    all_urls = {**shared_urls, **case_urls, **result_urls, **defect_urls}
     return project_code_source, (all_hashes, all_urls)
 
 
@@ -422,8 +421,11 @@ def extract_all_attachment_hashes(
             defect_hashes, defect_urls = extract_attachment_hashes_from_defects(
                 source_service, project_code_source
             )
-            all_hashes = case_hashes | result_hashes | defect_hashes
-            all_urls = {**case_urls, **result_urls, **defect_urls}
+            shared_hashes, shared_urls = extract_attachment_hashes_from_shared_steps(
+                source_service, project_code_source
+            )
+            all_hashes = case_hashes | result_hashes | defect_hashes | shared_hashes
+            all_urls = {**shared_urls, **case_urls, **result_urls, **defect_urls}
             all_project_attachments[project_code_source] = (all_hashes, all_urls)
         return all_project_attachments
 

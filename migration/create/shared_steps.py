@@ -7,6 +7,8 @@ from qase.api_client_v1.api.shared_steps_api import SharedStepsApi
 from qase.api_client_v1.models import SharedStepCreate, SharedStepContentCreate
 from qase_service import QaseService
 from migration.utils import MigrationMappings, MigrationStats, retry_with_backoff, to_dict
+from migration.create.cases import source_attachment_hash
+from migration.transform.attachments import as_attachment_list, replace_attachment_hashes_in_text
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,30 @@ def migrate_shared_steps(
     shared_steps_api_target = SharedStepsApi(target_service.client)
     shared_step_mapping = {}
     existing = dict(mappings.shared_steps.get(project_code_source, {}))
+
+    # Attachments are migrated before any project, so their mapping is ready.
+    # Without it a shared step kept links to the source workspace, which stop
+    # working when that workspace's links are signed and expire after an hour.
+    attachment_mapping: Dict[str, str] = {}
+    for key, value in (mappings.attachments.get(project_code_source) or {}).items():
+        attachment_mapping[key] = value
+        attachment_mapping[str(key).lower()] = value
+    target_workspace_hash = getattr(mappings, 'target_workspace_hash', None)
+    target_urls = getattr(mappings, 'attachment_urls', None)
+
+    def rewrite(text: Any) -> Any:
+        if not attachment_mapping or not isinstance(text, str):
+            return text
+        return replace_attachment_hashes_in_text(text, attachment_mapping, target_workspace_hash, target_urls)
+
+    def map_attachments(items: Any) -> List[str]:
+        out: List[str] = []
+        for item in as_attachment_list(items):
+            source_hash = source_attachment_hash(item)
+            target_hash = attachment_mapping.get(source_hash) or attachment_mapping.get(str(source_hash).lower()) if source_hash else None
+            if target_hash and target_hash not in out:
+                out.append(target_hash)
+        return out
     
     for step_dict in shared_steps:
         source_hash = step_dict.get('hash')
@@ -56,12 +82,16 @@ def migrate_shared_steps(
             if not action:
                 action = 'No action'
             
-            processed_steps.append(
-                SharedStepContentCreate(
-                    action=action,
-                    expected_result=step_item_dict.get('expected_result') or step_item_dict.get('expected')
-                )
+            content = SharedStepContentCreate(
+                action=rewrite(action),
+                expected_result=rewrite(step_item_dict.get('expected_result') or step_item_dict.get('expected')),
             )
+            if step_item_dict.get('data'):
+                content.data = rewrite(step_item_dict['data'])
+            step_attachments = map_attachments(step_item_dict.get('attachments'))
+            if step_attachments:
+                content.attachments = step_attachments
+            processed_steps.append(content)
         
         shared_step_data = SharedStepCreate(
             title=step_dict['title'],

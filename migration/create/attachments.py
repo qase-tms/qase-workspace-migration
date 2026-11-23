@@ -14,15 +14,15 @@ import requests
 from migration import qase_http
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 from typing import Dict, Set, List, Any, Optional, Tuple
 from tqdm import tqdm
 from qase.api_client_v1.api.attachments_api import AttachmentsApi
 from qase.api_client_v1.api.cases_api import CasesApi
-from qase.api_client_v1.exceptions import ApiException
 from qase_service import QaseService
 from migration.utils import MigrationMappings, MigrationStats, retry_with_backoff, extract_entities_from_response, to_dict
 from migration.extract.attachments import extract_all_attachment_hashes
+from migration.transform.attachments import attachment_hash_from_url
 from migration.qase_rate_limit import QaseApiRateLimiter, exponential_backoff_delay
 
 logger = logging.getLogger(__name__)
@@ -64,66 +64,154 @@ _ATTACHMENT_GET_MAX_RETRIES = 12
 _ATTACHMENT_GET_BASE_DELAY = 1.5
 
 
-def _try_download_markdown_url(
-    markdown_url: str,
-    attachment_hash: str,
-    source_service: QaseService,
-    filename_hint: Optional[str] = None,
-) -> Tuple[Optional[bytes], Optional[str]]:
-    """HTTP-only download from a known attachment URL (safe for parallel use)."""
-    filename = filename_hint
-    if not filename:
-        parsed = urlparse(markdown_url)
-        # The path is percent-encoded, so without decoding a file called
-        # "my screenshot.png" arrives as "my%20screenshot.png".
-        url_filename = unquote(os.path.basename(parsed.path))
-        if url_filename and url_filename != "/":
-            filename = url_filename
+_MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+# A signed link this close to its expiry is treated as expired, so the download
+# does not start on a link that lapses mid-transfer.
+_SIGNED_URL_MARGIN_SECONDS = 120
+
+
+def _source_qase_hosts(source_service: QaseService) -> Set[str]:
+    """Hosts that belong to the source workspace's Qase cluster."""
+    host = (getattr(source_service, "host", "") or "").strip().lower()
+    if not host:
+        return set()
+    delimiter = "." if host == "qase.io" else "-"
+    return {host} | {f"{prefix}{delimiter}{host}" for prefix in ("api", "app", "files")}
+
+
+def _is_qase_host(hostname: Optional[str], source_service: QaseService) -> bool:
+    hn = (hostname or "").lower()
+    return hn in _source_qase_hosts(source_service) or hn == "qase.io" or hn.endswith(".qase.io")
+
+
+def signed_url_expired(url: Optional[str], now: Optional[float] = None) -> bool:
+    """True when a signed Qase link's exp has passed (or is about to)."""
+    if not url:
+        return False
     try:
-        url_response = qase_http.get(markdown_url, timeout=60)
-        if url_response.status_code == 200:
-            content = url_response.content
-            if not filename:
-                parsed = urlparse(markdown_url)
-                filename = os.path.basename(parsed.path) or f"attachment_{attachment_hash[:8]}.bin"
-            return content, filename
-        if url_response.status_code == 403:
-            headers = {"Token": source_service.api_token}
-            url_response = qase_http.get(markdown_url, headers=headers, timeout=60)
-            if url_response.status_code == 200:
-                if not filename:
-                    parsed = urlparse(markdown_url)
-                    filename = unquote(os.path.basename(parsed.path)) or f"attachment_{attachment_hash[:8]}.bin"
-                return url_response.content, filename
-    except Exception:
-        pass
-    return None, None
+        exp = parse_qs(urlparse(url).query).get("exp")
+        if not exp:
+            return False
+        value = int(exp[0])
+    except (TypeError, ValueError):
+        return False
+    if value > 10**12:  # milliseconds
+        value //= 1000
+    return value <= (now if now is not None else time.time()) + _SIGNED_URL_MARGIN_SECONDS
+
+
+def _get_following_redirects(
+    url: str, headers: Optional[Dict[str, str]], timeout: int
+) -> Tuple[Optional[requests.Response], bool]:
+    """
+    GET, following redirects by hand so headers are sent to the first host only.
+
+    requests strips Authorization on a cross-host redirect but not a custom
+    Token header, so letting it follow a signed link's redirect to storage would
+    hand the API token to the storage provider.
+    """
+    redirected = False
+    for _ in range(_MAX_REDIRECTS + 1):
+        r = qase_http.get(url, headers=headers, timeout=timeout, allow_redirects=False)
+        location = r.headers.get("Location")
+        if r.status_code in _REDIRECT_STATUSES and location:
+            url = urljoin(url, location)
+            headers = None
+            redirected = True
+            continue
+        return r, redirected
+    return None, redirected
+
+
+def fetch_file_url(
+    url: str, source_service: QaseService, timeout: int = 60
+) -> Tuple[Optional[bytes], Optional[str]]:
+    """
+    Download a stored file from a link. Returns (content, None) or (None, reason).
+
+    The API token is sent only to the source's own Qase hosts, only after an
+    anonymous request was refused, and never along a redirect.
+    """
+    parsed = urlparse(url or "")
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None, f"the link is not a web address: {url!r}"
+    try:
+        r, redirected = _get_following_redirects(url, None, timeout)
+        if (
+            r is not None
+            and r.status_code in (401, 403)
+            and parsed.hostname.lower() in _source_qase_hosts(source_service)
+        ):
+            r, redirected = _get_following_redirects(
+                url, {"Token": source_service.api_token}, timeout
+            )
+    except Exception as e:
+        return None, f"downloading the file failed: {e}"
+    if r is None:
+        return None, "the link redirected too many times"
+    if r.status_code != 200:
+        return None, f"downloading the file returned HTTP {r.status_code}"
+    content_type = (r.headers.get("Content-Type") or "").lower()
+    if redirected and "text/html" in content_type and _is_qase_host(urlparse(r.url).hostname, source_service):
+        # An old public link in a workspace with private attachments ends on
+        # Qase's sign-in page. Uploading that page would be worse than nothing.
+        return None, "the link led to a Qase sign-in page instead of the file"
+    return r.content, None
+
+
+def _filename_from_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    # The path is percent-encoded, so without decoding a file called
+    # "my screenshot.png" arrives as "my%20screenshot.png".
+    name = unquote(os.path.basename(urlparse(url).path))
+    return name if name and name != "/" else None
+
+
+def _upload_result_items(data: Any) -> Optional[List[Any]]:
+    if not isinstance(data, dict) or not data.get("status"):
+        return None
+    result = data.get("result")
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        if "hash" in result:
+            return [result]
+        entities = result.get("entities")
+        if isinstance(entities, list):
+            return entities
+    return None
 
 
 def _parse_hashes_from_upload_json(data: Any, expected_n: int) -> List[Optional[str]]:
     """Normalize attachment upload JSON into a list of target hashes."""
-    if not isinstance(data, dict) or not data.get("status"):
+    items = _upload_result_items(data)
+    if items is None:
         return [None] * expected_n
-    result = data.get("result")
-    if result is None:
-        return [None] * expected_n
-    if isinstance(result, list):
-        out = []
-        for item in result:
-            if isinstance(item, dict):
-                out.append(item.get("hash"))
-            elif hasattr(item, "hash"):
-                out.append(getattr(item, "hash", None))
-            else:
-                out.append(None)
-        return out
-    if isinstance(result, dict):
-        if "hash" in result:
-            return [result.get("hash")]
-        entities = result.get("entities")
-        if isinstance(entities, list):
-            return [e.get("hash") if isinstance(e, dict) else None for e in entities]
-    return [None] * expected_n
+    out = []
+    for item in items:
+        if isinstance(item, dict):
+            out.append(item.get("hash"))
+        else:
+            out.append(getattr(item, "hash", None))
+    return out
+
+
+def _record_target_urls(mappings: MigrationMappings, data: Any) -> None:
+    """
+    Keep the target's own link for each uploaded file.
+
+    Text that linked a source file is rewritten to this link. For a source with
+    private attachments the source link is signed for the source workspace, so
+    swapping the hash inside it cannot produce a working target link.
+    """
+    urls = getattr(mappings, "attachment_urls", None)
+    if urls is None:
+        return
+    for item in _upload_result_items(data) or []:
+        if isinstance(item, dict) and item.get("hash") and item.get("url"):
+            urls[item["hash"]] = item["url"]
 
 
 def _maybe_capture_workspace_hash_from_upload_result(mappings: MigrationMappings, data: Any) -> None:
@@ -138,9 +226,13 @@ def _maybe_capture_workspace_hash_from_upload_result(mappings: MigrationMappings
                 scan(v)
             u = obj.get("url") or obj.get("full_path")
             if isinstance(u, str):
-                m = re.search(r"/public/team/([a-f0-9]{32,64})/", u, re.IGNORECASE)
+                m = re.search(
+                    r"/public/team/([a-f0-9]{32,64})/|/attachments/api/([a-f0-9]{32,64})/",
+                    u,
+                    re.IGNORECASE,
+                )
                 if m:
-                    mappings.target_workspace_hash = m.group(1)
+                    mappings.target_workspace_hash = m.group(1) or m.group(2)
         elif isinstance(obj, list):
             for x in obj:
                 scan(x)
@@ -242,6 +334,7 @@ def _upload_files_http(
             r.raise_for_status()
             payload = r.json()
             _maybe_capture_workspace_hash_from_upload_result(mappings, payload)
+            _record_target_urls(mappings, payload)
             hashes = _parse_hashes_from_upload_json(payload, n)
             if len(hashes) < n:
                 hashes.extend([None] * (n - len(hashes)))
@@ -391,10 +484,7 @@ def check_existing_attachments_in_target(
                                     if 'hash' in att_item:
                                         att_hash = att_item['hash']
                                     elif 'url' in att_item:
-                                        url = att_item['url']
-                                        match = re.search(r'/attachment/([a-f0-9]{32,64})/', url, re.IGNORECASE)
-                                        if match:
-                                            att_hash = match.group(1)
+                                        att_hash = attachment_hash_from_url(att_item['url'])
                                 if att_hash:
                                     existing_attachments.add(att_hash.lower())
                     
@@ -409,8 +499,44 @@ def check_existing_attachments_in_target(
     return existing_attachments
 
 
+def _get_attachment_record(
+    source_service: QaseService,
+    attachment_hash: str,
+    source_api_limiter: Optional[QaseApiRateLimiter] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    GET /v1/attachment/{hash}: the file's record with a fresh link.
+
+    Raw HTTP rather than the SDK, so a record shape the SDK does not model
+    cannot cost the file. Transient failures are retried by qase_http.
+    """
+    base = source_service.client.configuration.host.rstrip("/")
+    headers = {"Token": source_service.api_token, "accept": "application/json"}
+    try:
+        if source_api_limiter:
+            source_api_limiter.acquire(1)
+        r = qase_http.get(f"{base}/attachment/{attachment_hash}", headers=headers, timeout=60)
+    except Exception as e:
+        return None, f"looking up the attachment failed: {e}"
+    if r.status_code == 404:
+        return None, (
+            "the source API has no attachment with this hash (404), so the "
+            "file is referenced but no longer stored"
+        )
+    if r.status_code != 200:
+        return None, f"looking up the attachment returned HTTP {r.status_code}"
+    try:
+        data = r.json()
+    except ValueError:
+        return None, "looking up the attachment returned something other than JSON"
+    record = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(record, dict):
+        return None, "looking up the attachment returned no record"
+    return record, None
+
+
 def download_attachment(
-    attachments_api_source: AttachmentsApi,
+    attachments_api_source: Optional[AttachmentsApi],
     attachment_hash: str,
     markdown_url: Optional[str],
     source_service: QaseService,
@@ -421,160 +547,61 @@ def download_attachment(
     """
     Download attachment content and extract filename.
 
+    The link found while collecting attachments is tried first. A signed link
+    lasts an hour, so on a long run it may have expired; then, or if it fails
+    for any other reason, a fresh link is fetched from the attachment's record.
+
+    ``attachments_api_source`` and ``client_lock`` are no longer used and are
+    kept so existing callers do not break.
+
     Returns:
         Tuple of (file_content, filename) or (None, None) if download fails
     """
-    file_content = None
-    filename = None
-    # Every path that can end without content records why, so a missing
-    # attachment can be explained instead of just counted.
-    failure_reason: Optional[str] = None
+    filename = _filename_from_url(markdown_url)
+    reasons: List[str] = []
 
-    if markdown_url:
-        parsed = urlparse(markdown_url)
-        url_filename = os.path.basename(parsed.path)
-        if url_filename and url_filename != "/":
-            filename = url_filename
+    if markdown_url and not signed_url_expired(markdown_url):
+        content, reason = fetch_file_url(markdown_url, source_service)
+        if content is not None:
+            return content, filename or f"attachment_{attachment_hash[:8]}.bin"
+        reasons.append(f"from the link in the source: {reason}")
 
-    download_response = None
-    for attempt in range(_ATTACHMENT_GET_MAX_RETRIES):
-        try:
+    record, reason = _get_attachment_record(source_service, attachment_hash, source_api_limiter)
+    content = None
+    if record is None:
+        reasons.append(reason)
+    else:
+        if not filename:
+            filename = (
+                record.get("filename")
+                or _filename_from_url(record.get("full_path") or record.get("url"))
+                or (f"attachment_{attachment_hash[:8]}.{record['extension']}" if record.get("extension") else None)
+            )
+        raw = record.get("file")
+        if isinstance(raw, str) and raw:
+            try:
+                content = base64.b64decode(raw)
+            except Exception as e:
+                reasons.append(f"the file content could not be decoded: {e}")
+        fresh_url = record.get("url") or record.get("full_path")
+        if content is None and fresh_url:
+            content, reason = fetch_file_url(fresh_url, source_service)
+            if content is None:
+                reasons.append(f"from the attachment record: {reason}")
+        elif content is None:
+            reasons.append("the attachment record has no file and no link")
 
-            def _do_get():
-                if source_api_limiter:
-                    source_api_limiter.acquire(1)
-                return attachments_api_source.get_attachment(hash=attachment_hash)
-
-            if client_lock is not None:
-                with client_lock:
-                    download_response = _do_get()
-            else:
-                download_response = _do_get()
-            break
-        except ApiException as e:
-            if e.status == 404:
-                failure_reason = (
-                    "the source API has no attachment with this hash (404), so the "
-                    "file is referenced but no longer stored"
-                )
-                download_response = None
-                break
-            if e.status == 429 or (e.status is not None and e.status >= 500):
-                if attempt < _ATTACHMENT_GET_MAX_RETRIES - 1:
-                    delay = exponential_backoff_delay(attempt, base_delay=_ATTACHMENT_GET_BASE_DELAY)
-                    logger.info(
-                        "get_attachment %s HTTP %s, backoff %.1fs (%s/%s)",
-                        attachment_hash[:12],
-                        e.status,
-                        delay,
-                        attempt + 1,
-                        _ATTACHMENT_GET_MAX_RETRIES,
-                    )
-                    time.sleep(delay)
-                    continue
-            failure_reason = f"get_attachment returned HTTP {getattr(e, 'status', '?')}"
-            logger.debug("get_attachment failed for %s: %s", attachment_hash[:12], e)
-            download_response = None
-            break
-        except Exception as api_error:
-            if attempt < _ATTACHMENT_GET_MAX_RETRIES - 1:
-                delay = exponential_backoff_delay(attempt, base_delay=_ATTACHMENT_GET_BASE_DELAY)
-                time.sleep(delay)
-                continue
-            failure_reason = f"get_attachment failed: {api_error}"
-            logger.debug("get_attachment error for %s: %s", attachment_hash[:12], api_error)
-            download_response = None
-            break
-
-    if download_response and hasattr(download_response, 'status') and download_response.status:
-        if hasattr(download_response, 'result') and download_response.result:
-            attachment_obj = download_response.result
-            
-            # Try to get file content from 'file' field
-            if hasattr(attachment_obj, 'file') and attachment_obj.file is not None:
-                if isinstance(attachment_obj.file, bytes):
-                    file_content = attachment_obj.file
-                elif isinstance(attachment_obj.file, str):
-                    try:
-                        file_content = base64.b64decode(attachment_obj.file)
-                    except Exception as decode_error:
-                        failure_reason = f"the file content could not be decoded: {decode_error}"
-
-            
-            if not filename:
-                if hasattr(attachment_obj, 'filename') and attachment_obj.filename:
-                    filename = attachment_obj.filename
-                elif hasattr(attachment_obj, 'full_path') and attachment_obj.full_path:
-                    filename = os.path.basename(attachment_obj.full_path)
-                elif hasattr(attachment_obj, 'extension') and attachment_obj.extension:
-                    filename = f"attachment_{attachment_hash[:8]}.{attachment_obj.extension}"
-            
-            if not file_content:
-                url_to_download = None
-                if hasattr(attachment_obj, 'url'):
-                    url_value = getattr(attachment_obj, 'url', None)
-                    if url_value:
-                        url_to_download = url_value
-                if not url_to_download and hasattr(attachment_obj, 'full_path'):
-                    full_path_value = getattr(attachment_obj, 'full_path', None)
-                    if full_path_value:
-                        url_to_download = full_path_value
-                
-                if url_to_download:
-                    try:
-                        url_response = qase_http.get(url_to_download, timeout=60)
-                        if url_response.status_code == 200:
-                            file_content = url_response.content
-                        elif url_response.status_code == 403:
-                            headers = {'Token': source_service.api_token}
-                            url_response = qase_http.get(url_to_download, headers=headers, timeout=60)
-                            if url_response.status_code == 200:
-                                file_content = url_response.content
-                            else:
-                                failure_reason = (
-                                    f"the stored file rejected the download even with the "
-                                    f"API token (HTTP {url_response.status_code})"
-                                )
-                        else:
-                            failure_reason = (
-                                f"downloading the stored file returned HTTP "
-                                f"{url_response.status_code}"
-                            )
-                    except Exception as e:
-                        failure_reason = f"downloading the stored file failed: {e}" 
-    
-    if not file_content and markdown_url:
-        try:
-            url_response = qase_http.get(markdown_url, timeout=60)
-            if url_response.status_code == 200:
-                file_content = url_response.content
-                if not filename:
-                    parsed = urlparse(markdown_url)
-                    filename = unquote(os.path.basename(parsed.path)) or f"attachment_{attachment_hash[:8]}.bin"
-            elif url_response.status_code == 403:
-                headers = {'Token': source_service.api_token}
-                url_response = qase_http.get(markdown_url, headers=headers, timeout=60)
-                if url_response.status_code == 200:
-                    file_content = url_response.content
-                    if not filename:
-                        parsed = urlparse(markdown_url)
-                        filename = os.path.basename(parsed.path) or f"attachment_{attachment_hash[:8]}.bin"
-        except Exception as e:
-            failure_reason = f"downloading from the attachment URL failed: {e}"
-
-    if not filename:
-        filename = f"attachment_{attachment_hash[:8]}.bin"
-
-    if not file_content:
+    if content is None:
         # The one place that knows why, so the operator is told rather than left
         # with a count of missing files.
         logger.warning(
             "Attachment %s was not migrated: %s",
             attachment_hash[:12] if isinstance(attachment_hash, str) else attachment_hash,
-            failure_reason or "the API returned no content and no usable file URL",
+            "; ".join(r for r in reasons if r) or "the API returned no content and no usable file URL",
         )
+        return None, None
 
-    return file_content, filename
+    return content, filename or f"attachment_{attachment_hash[:8]}.bin"
 
 
 def upload_attachment(
@@ -609,13 +636,7 @@ def _download_single_for_migration(
     sdk_lock: threading.Lock,
     source_api_limiter: Optional[QaseApiRateLimiter] = None,
 ) -> Tuple[str, Optional[bytes], Optional[str]]:
-    """Try public URL first (parallel-friendly), then SDK get_attachment (throttled, short lock)."""
-    if markdown_url:
-        content, filename = _try_download_markdown_url(
-            markdown_url, attachment_hash, source_service
-        )
-        if content and filename:
-            return attachment_hash, content, filename
+    """Download one file: its known link first, then a fresh link from its record."""
     content, filename = download_attachment(
         attachments_api_source,
         attachment_hash,

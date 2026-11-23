@@ -46,6 +46,9 @@ class MigrationMappings:
         self.result_hashes = {}
         self.results_done = {}  # project -> source run ids whose results were sent
         self.target_workspace_hash = None
+        # target attachment hash -> the target's own link to it, from the upload
+        # response. Text links are rewritten to these.
+        self.attachment_urls = {}
         # Target user id for anything whose source author has no mapping. Set from
         # users.default at startup; not persisted in the mappings file.
         self.default_user_id = 1
@@ -76,6 +79,7 @@ class MigrationMappings:
             'result_hashes': getattr(self, 'result_hashes', {}),
             'results_done': self.results_done,
             'target_workspace_hash': self.target_workspace_hash,
+            'attachment_urls': self.attachment_urls,
         }
         with open(filepath, 'w') as f:
             json.dump(mappings_dict, f, indent=2)
@@ -119,6 +123,7 @@ class MigrationMappings:
             self.result_hashes = mappings_dict.get('result_hashes', {})
             self.results_done = mappings_dict.get('results_done', {})
             self.target_workspace_hash = mappings_dict.get('target_workspace_hash')
+            self.attachment_urls = mappings_dict.get('attachment_urls', {}) or {}
         except FileNotFoundError:
             return
         # JSON object keys are always strings, but every step compares source ids
@@ -264,6 +269,7 @@ def fork_mappings_for_parallel_project(base: "MigrationMappings") -> "MigrationM
     m.attachments = base.attachments
     m.projects = base.projects
     m.target_workspace_hash = base.target_workspace_hash
+    m.attachment_urls = base.attachment_urls
     m.default_user_id = base.default_user_id
     m.trace = base.trace
     return m

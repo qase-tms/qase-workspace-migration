@@ -878,3 +878,266 @@ def test_result_times_are_sent_and_clamped_to_the_run():
     before = dict(inside, end_time="2026-02-09T06:00:00+00:00")
     rc2 = _source_to_result_create_v2(before, 5, mappings, {}, {}, run_start_epoch=run_start)
     assert rc2.execution.start_time is None and rc2.execution.end_time is None
+
+
+# --------------------------------------------------------------------------
+# Private attachments (Nov 2026)
+#
+# In a workspace with private attachments every file link the API returns is
+# signed: /v1/attachments/api/{workspace}/{hash}/{file}?exp=&sig=, valid for an
+# hour, redirecting to storage. Attachment objects no longer carry a hash.
+# --------------------------------------------------------------------------
+
+_WS = "b" * 40
+_SRC = "1" * 40
+_SIGNED = (
+    f"https://app-eu.qase.io/v1/attachments/api/{_WS}/{_SRC}/my%20shot.png"
+    "?exp=1795464959&sig=abc123"
+)
+
+
+def test_signed_link_yields_the_file_hash_not_the_workspace():
+    from migration.transform.attachments import attachment_hash_from_url
+
+    assert attachment_hash_from_url(_SIGNED) == _SRC
+    assert attachment_hash_from_url(
+        f"https://files-eu.qase.io/public/team/{_WS}/attachment/{_SRC}/a.png"
+    ) == _SRC
+    uuid = "12345678-1234-1234-1234-1234567890ab"
+    assert attachment_hash_from_url(f"https://x.qase.io/attachments/{uuid}/v.mp4") == uuid.replace("-", "")
+    assert attachment_hash_from_url("https://placehold.co/600x400.png") is None
+    assert attachment_hash_from_url(None) is None
+
+
+def test_attachments_given_as_a_positional_object_become_a_list():
+    """Qase returns a step list with a gap as {"1": {...}}; the SDK rejects it."""
+    from migration.transform.attachments import as_attachment_list
+
+    item = {"url": _SIGNED, "filename": "my shot.png"}
+    assert as_attachment_list({"1": item}) == [item]
+    assert as_attachment_list({"2": "b", "1": "a"}) == ["a", "b"]
+    assert as_attachment_list([item]) == [item]
+    assert as_attachment_list(item) == [item]
+    assert as_attachment_list(None) == []
+
+
+def test_case_attachments_without_a_hash_are_collected_from_their_url():
+    from migration.extract.attachments import _ingest_attachment_like_items
+
+    hashes, urls = set(), {}
+    _ingest_attachment_like_items(
+        {"1": {"size": 10, "mime": "image/png", "filename": "my shot.png", "url": _SIGNED}},
+        hashes,
+        urls,
+    )
+    assert hashes == {_SRC}
+    assert urls == {_SRC: _SIGNED}
+
+
+def test_signed_links_in_text_are_found():
+    from migration.transform.attachments import (
+        extract_attachment_hashes_from_text,
+        extract_attachment_urls_from_text,
+    )
+
+    text = f"before ![shot]({_SIGNED}) and [log](https://placehold.co/x.txt)"
+    assert extract_attachment_hashes_from_text(text) == {_SRC}
+    assert extract_attachment_urls_from_text(text) == {_SRC: _SIGNED}
+
+
+def test_text_links_point_at_the_target_copy():
+    from migration.transform.attachments import replace_attachment_hashes_in_text
+
+    tgt = "2" * 40
+    target_url = f"https://files-eu.qase.io/public/team/{'c' * 40}/attachment/{tgt}/my%20shot.png"
+    text = f"see ![shot]({_SIGNED}) and ![other](https://placehold.co/600.png)"
+
+    out = replace_attachment_hashes_in_text(text, {_SRC: tgt}, None, {tgt: target_url})
+    assert out == f"see ![shot]({target_url}) and ![other](https://placehold.co/600.png)"
+
+    # Without a recorded target link the hash and workspace are swapped and the
+    # source's signature is dropped.
+    out = replace_attachment_hashes_in_text(text, {_SRC: tgt}, "d" * 40)
+    assert f"/attachments/api/{'d' * 40}/{tgt}/my%20shot.png)" in out
+    assert "sig=" not in out
+
+    # Old public links keep working as before.
+    old = f"![a](https://files.qase.io/public/team/{_WS}/attachment/{_SRC}/a.png)"
+    assert replace_attachment_hashes_in_text(old, {_SRC: tgt}, "e" * 40) == (
+        f"![a](https://files.qase.io/public/team/{'e' * 40}/attachment/{tgt}/a.png)"
+    )
+
+
+def test_result_steps_with_positional_attachments_map():
+    from migration.create.results import _map_attachment_hashes
+
+    tgt = "3" * 40
+    assert _map_attachment_hashes({"1": {"url": _SIGNED}}, {_SRC: tgt}) == [tgt]
+
+
+def test_upload_records_the_target_link():
+    from migration.create.attachments import _parse_hashes_from_upload_json, _record_target_urls
+
+    tgt = "4" * 40
+    url = f"https://app-eu.qase.io/v1/attachments/api/{_WS}/{tgt}/a.png?exp=1&sig=x"
+    payload = {"status": True, "result": [{"hash": tgt, "url": url, "filename": "a.png"}]}
+    mappings = MigrationMappings()
+    _record_target_urls(mappings, payload)
+    assert _parse_hashes_from_upload_json(payload, 1) == [tgt]
+    assert mappings.attachment_urls == {tgt: url}
+    assert workspace_mappings_round_trip(mappings).attachment_urls == {tgt: url}
+
+
+def workspace_mappings_round_trip(mappings):
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "m.json")
+        mappings.save_to_file(path)
+        loaded = MigrationMappings()
+        loaded.load_from_file(path)
+        return loaded
+
+
+def test_signed_link_expiry():
+    from migration.create.attachments import signed_url_expired
+
+    now = 1_800_000_000
+    assert signed_url_expired(f"https://x/a.png?exp={now - 1}&sig=s", now=now)
+    assert signed_url_expired(f"https://x/a.png?exp={now + 60}&sig=s", now=now), "inside the margin"
+    assert not signed_url_expired(f"https://x/a.png?exp={now + 3600}&sig=s", now=now)
+    assert not signed_url_expired("https://x/a.png", now=now)
+
+
+class _FileServer(BaseHTTPRequestHandler):
+    """/signed needs a Token and redirects to /storage; /login is a sign-in page."""
+
+    seen = []
+
+    def do_GET(self):
+        token = self.headers.get("Token")
+        type(self).seen.append((self.path, token))
+        if self.path.startswith("/signed"):
+            if not token:
+                return self._send(403, b"no")
+            return self._send(302, b"", {"Location": "/storage/a.png"})
+        if self.path.startswith("/storage"):
+            return self._send(200, b"PNGDATA", {"Content-Type": "image/png"})
+        if self.path.startswith("/public"):
+            return self._send(302, b"", {"Location": "/login"})
+        if self.path.startswith("/login"):
+            return self._send(200, b"<html>sign in</html>", {"Content-Type": "text/html"})
+        return self._send(404, b"")
+
+    def _send(self, status, body, headers=None):
+        self.send_response(status)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def file_server():
+    httpd = HTTPServer(("127.0.0.1", 0), _FileServer)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    _FileServer.seen = []
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+
+
+def test_token_is_never_sent_along_a_redirect(file_server):
+    from migration.create.attachments import fetch_file_url
+
+    source = SimpleNamespace(host="127.0.0.1", api_token="secret-token")
+    content, reason = fetch_file_url(f"{file_server}/signed/a.png", source)
+    assert content == b"PNGDATA", reason
+    storage_hits = [tok for path, tok in _FileServer.seen if path.startswith("/storage")]
+    assert storage_hits == [None], "the storage request must not carry the API token"
+
+
+def test_token_is_never_sent_to_a_host_outside_the_source(file_server):
+    from migration.create.attachments import fetch_file_url
+
+    source = SimpleNamespace(host="qase.io", api_token="secret-token")
+    content, reason = fetch_file_url(f"{file_server}/signed/a.png", source)
+    assert content is None and "403" in reason
+    assert all(tok is None for _path, tok in _FileServer.seen)
+
+
+def test_a_sign_in_page_is_not_taken_for_the_file(file_server):
+    from migration.create.attachments import fetch_file_url
+
+    source = SimpleNamespace(host="127.0.0.1", api_token="secret-token")
+    content, reason = fetch_file_url(f"{file_server}/public/a.png", source)
+    assert content is None and "sign-in" in reason
+
+
+def test_expired_link_falls_back_to_a_fresh_one(monkeypatch):
+    from migration.create import attachments as att
+
+    fetched = []
+    monkeypatch.setattr(att, "fetch_file_url", lambda url, svc, timeout=60: (fetched.append(url) or b"DATA", None))
+    monkeypatch.setattr(
+        att, "_get_attachment_record",
+        lambda svc, h, lim=None: ({"filename": "a.png", "url": "https://app-eu.qase.io/fresh?exp=9999999999"}, None),
+    )
+    expired = "https://app-eu.qase.io/v1/attachments/api/w/h/a.png?exp=1&sig=s"
+    content, name = att.download_attachment(None, _SRC, expired, SimpleNamespace(host="eu.qase.io"))
+    assert content == b"DATA" and name == "a.png"
+    assert fetched == ["https://app-eu.qase.io/fresh?exp=9999999999"], "the expired link is not even tried"
+
+
+def test_shared_steps_carry_their_files_data_and_target_links(monkeypatch):
+    """Shared steps kept source links (dead within the hour) and lost files and data."""
+    from migration.create import shared_steps as ss
+    from migration.extract import shared_steps as extract_ss
+
+    tgt_doc, tgt_img = "5" * 40, "6" * 40
+    target_url = f"https://attachments.qase.io/public/team/{'c' * 40}/attachment/{tgt_img}/purple.png"
+    monkeypatch.setattr(extract_ss, "extract_shared_steps", lambda svc, code: [{
+        "hash": "s1", "title": "Shared",
+        "steps": [{
+            "action": f"Act ![purple]({_SIGNED})",
+            "expected_result": "ok",
+            "data": f"Data ![purple]({_SIGNED})",
+            "attachments": [{"url": _SIGNED.replace(_SRC, '7' * 40)}],
+        }],
+    }])
+    sent = []
+
+    class FakeApi:
+        def __init__(self, client):
+            pass
+
+        def create_shared_step(self, code, shared_step_create):
+            sent.append(shared_step_create)
+            return SimpleNamespace(status=True, result=SimpleNamespace(hash="t1"))
+
+    monkeypatch.setattr(ss, "SharedStepsApi", FakeApi)
+    mappings = MigrationMappings()
+    mappings.attachments = {"P": {_SRC: tgt_img, "7" * 40: tgt_doc}}
+    mappings.attachment_urls = {tgt_img: target_url}
+
+    assert ss.migrate_shared_steps(None, SimpleNamespace(client=None), "P", "P", mappings, MigrationStats()) == {"s1": "t1"}
+    step = sent[0].steps[0]
+    assert step.action == f"Act ![purple]({target_url})"
+    assert step.data == f"Data ![purple]({target_url})"
+    assert step.attachments == [tgt_doc]
+
+
+def test_steps_built_from_the_case_do_not_copy_its_files():
+    from migration.create.results import _merge_result_steps_with_case_steps
+
+    case_steps = [{"action": "a", "attachments": [{"hash": "h1"}]}]
+    synth = _merge_result_steps_with_case_steps([], case_steps, parent_status_id=2)
+    assert synth == [{"action": "a", "status_id": 2}]
+    merged = _merge_result_steps_with_case_steps([{"status": 1}], case_steps)
+    assert "attachments" not in merged[0]
+    kept = _merge_result_steps_with_case_steps([{"status": 1, "attachments": ["r1"]}], case_steps)
+    assert kept[0]["attachments"] == ["r1"], "the result's own step files stay"

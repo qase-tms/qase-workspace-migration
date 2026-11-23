@@ -53,7 +53,11 @@ from migration.extract.results import ResultsFetchError, extract_results, fetch_
 from migration.extract.runs import fetch_run_detail_json
 from migration.extract.authors import extract_authors
 from migration.create.runs import _source_run_should_complete_after_results
-from migration.transform.attachments import replace_attachment_hashes_in_text
+from migration.transform.attachments import (
+    as_attachment_list,
+    attachment_hash_from_url,
+    replace_attachment_hashes_in_text,
+)
 from migration.trace_log import (
     chunk_results_payload_for_trace,
     summarize_enriched_result,
@@ -137,13 +141,6 @@ _STEP_INT_TO_V2: Dict[int, ResultStepStatus] = {
 }
 
 
-# Qase markdown and API URLs: /attachment/{hash}/ or /attachments/{hash}/; hash may be UUID.
-_ATTACHMENT_URL_RE = re.compile(
-    r"/attachments?/([a-f0-9]{32,64}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/",
-    re.IGNORECASE,
-)
-
-
 def _looks_like_attachment_hash(s: str) -> bool:
     t = str(s).strip().replace("-", "")
     return len(t) >= 32 and bool(re.fullmatch(r"[a-f0-9]+", t, re.I))
@@ -172,11 +169,9 @@ def _hashes_from_attachment_item(att_item: Any) -> List[str]:
         s = att_item.strip()
         if _looks_like_attachment_hash(s):
             found.append(s.replace("-", "").lower() if "-" in s else s)
-        m = _ATTACHMENT_URL_RE.search(s)
-        if m:
-            g = m.group(1).replace("-", "").lower()
-            if g not in found:
-                found.append(g)
+        g = attachment_hash_from_url(s)
+        if g and g not in found:
+            found.append(g)
         return found
     if isinstance(att_item, dict):
         d = to_dict(att_item)
@@ -206,13 +201,9 @@ def _hashes_from_attachment_item(att_item: Any) -> List[str]:
             "src",
             "file_url",
         ):
-            u = d.get(uk)
-            if u:
-                m = _ATTACHMENT_URL_RE.search(str(u))
-                if m:
-                    hx = m.group(1).replace("-", "").lower()
-                    if hx not in found:
-                        found.append(hx)
+            hx = attachment_hash_from_url(d.get(uk))
+            if hx and hx not in found:
+                found.append(hx)
     return found
 
 
@@ -222,8 +213,7 @@ def _map_attachment_hashes(
 ) -> List[str]:
     if not att_items or not attachment_mapping:
         return []
-    if not isinstance(att_items, list):
-        att_items = [att_items]
+    att_items = as_attachment_list(att_items)
     out: List[str] = []
     seen = set()
     for att_item in att_items:
@@ -253,9 +243,7 @@ def _coalesce_result_attachments(result_dict: Dict[str, Any]) -> None:
     seen_sig: set = set()
 
     def _add(items: Any) -> None:
-        if not isinstance(items, list):
-            return
-        for it in items:
+        for it in as_attachment_list(items):
             sig = repr(it) if isinstance(it, dict) else str(it)
             if sig in seen_sig:
                 continue
@@ -279,12 +267,15 @@ def _rewrite_text(
     text: Optional[str],
     attachment_mapping: Dict[str, str],
     target_workspace_hash: Optional[str],
+    target_urls: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     if not text or not isinstance(text, str):
         return text
     if not attachment_mapping:
         return text
-    return replace_attachment_hashes_in_text(text, attachment_mapping, target_workspace_hash)
+    return replace_attachment_hashes_in_text(
+        text, attachment_mapping, target_workspace_hash, target_urls
+    )
 
 
 def _iter_result_steps(result_dict: Dict[str, Any]) -> Optional[List[Any]]:
@@ -444,6 +435,9 @@ def _merge_result_steps_with_case_steps(
     cs = [_flatten_step_dict(x) for x in (case_steps or [])]
     if not cs:
         return rs
+    # A result step's files are evidence from that execution. The case step's
+    # own files describe the test, so they never become result attachments.
+    cs = [{k: v for k, v in c.items() if k != "attachments"} for c in cs]
     if not rs:
         synth: List[Dict[str, Any]] = []
         for c in cs:
@@ -899,6 +893,7 @@ def _build_v2_step(
     step: Any,
     attachment_mapping: Dict[str, str],
     target_workspace_hash: Optional[str],
+    target_urls: Optional[Dict[str, str]] = None,
 ) -> Optional[ResultStep]:
     sd = _flatten_step_dict(step)
     if not sd:
@@ -939,7 +934,7 @@ def _build_v2_step(
         parts.append(f"**Comment**\n{extra_comment}")
     comment_md = "\n\n".join(parts) if parts else None
     if comment_md:
-        rw = _rewrite_text(comment_md, attachment_mapping, target_workspace_hash)
+        rw = _rewrite_text(comment_md, attachment_mapping, target_workspace_hash, target_urls)
         comment_md = rw if rw else comment_md
 
     step_attachments = _map_attachment_hashes(sd.get("attachments"), attachment_mapping)
@@ -969,7 +964,7 @@ def _build_v2_step(
     if nested and isinstance(nested, list):
         nested_dicts = []
         for ch in nested:
-            child_rs = _build_v2_step(ch, attachment_mapping, target_workspace_hash)
+            child_rs = _build_v2_step(ch, attachment_mapping, target_workspace_hash, target_urls)
             if child_rs:
                 nested_dicts.append(child_rs.model_dump(by_alias=True, exclude_none=True))
 
@@ -1232,6 +1227,7 @@ def _source_to_result_create_v2(
     """Build one API v2 ResultCreate from a v1-style result payload."""
     _coalesce_result_attachments(result_dict)
     target_workspace_hash = getattr(mappings, "target_workspace_hash", None)
+    target_urls = getattr(mappings, "attachment_urls", None)
     core = _resolve_result_status_string(result_dict)
 
     title = _resolve_result_display_title(result_dict, target_case_id)
@@ -1240,7 +1236,7 @@ def _source_to_result_create_v2(
     stack_raw = result_dict.get("stacktrace")
     stacktrace = None
     if stack_raw:
-        stacktrace = _rewrite_text(str(stack_raw), attachment_mapping, target_workspace_hash)
+        stacktrace = _rewrite_text(str(stack_raw), attachment_mapping, target_workspace_hash, target_urls)
         if isinstance(stacktrace, str) and not stacktrace.strip():
             stacktrace = None
 
@@ -1273,7 +1269,7 @@ def _source_to_result_create_v2(
             msg_parts.append(str(t))
     message = "\n\n".join(msg_parts) if msg_parts else None
     if message:
-        rw = _rewrite_text(message, attachment_mapping, target_workspace_hash)
+        rw = _rewrite_text(message, attachment_mapping, target_workspace_hash, target_urls)
         message = rw if rw else message
         if isinstance(message, str) and not message.strip():
             message = None
@@ -1285,7 +1281,7 @@ def _source_to_result_create_v2(
     if steps_src:
         built: List[ResultStep] = []
         for s in steps_src:
-            rs = _build_v2_step(s, attachment_mapping, target_workspace_hash)
+            rs = _build_v2_step(s, attachment_mapping, target_workspace_hash, target_urls)
             if rs:
                 built.append(rs)
         if built:
@@ -1316,7 +1312,7 @@ def _source_to_result_create_v2(
     else:
         desc = _standalone_migration_description(result_dict, result_dict.get("case_id"))
         if attachment_mapping:
-            rw = _rewrite_text(desc, attachment_mapping, target_workspace_hash)
+            rw = _rewrite_text(desc, attachment_mapping, target_workspace_hash, target_urls)
             desc = rw if rw else desc
         kwargs["fields"] = ResultCreateFields(
             description=desc,

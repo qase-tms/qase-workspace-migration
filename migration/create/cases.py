@@ -2,7 +2,6 @@
 Create cases in target Qase workspace.
 """
 import logging
-import re
 from typing import Dict, Any, Optional, TYPE_CHECKING
 from qase_service import QaseService
 
@@ -12,7 +11,11 @@ from migration.utils import (
     MigrationMappings, MigrationStats, to_dict, preserve_or_hash_id,
     QaseRawApiClient
 )
-from migration.transform.attachments import replace_attachment_hashes_in_text
+from migration.transform.attachments import (
+    as_attachment_list,
+    attachment_hash_from_url,
+    replace_attachment_hashes_in_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +34,7 @@ def source_attachment_hash(att_item: Any) -> Optional[str]:
     if isinstance(att_item, dict):
         if att_item.get("hash"):
             return att_item["hash"]
-        url = att_item.get("url")
-        if url:
-            match = re.search(r"/attachment/([a-f0-9]{32,64})/", str(url), re.IGNORECASE)
-            if match:
-                return match.group(1)
-        return None
+        return attachment_hash_from_url(att_item.get("url"))
     hash_attr = getattr(att_item, "hash", None)
     if isinstance(hash_attr, str) and hash_attr:
         return hash_attr
@@ -210,7 +208,7 @@ def transform_case_data(
     if target_suite_id:
         case_data['suite_id'] = target_suite_id
     
-    case_attachments = case_dict.get('attachments', []) or []
+    case_attachments = as_attachment_list(case_dict.get('attachments'))
     mapped_case_attachments = []
     if case_attachments and attachment_mapping:
         for att_item in case_attachments:
@@ -223,15 +221,16 @@ def transform_case_data(
     case_data['attachments'] = mapped_case_attachments
     
     target_workspace_hash = getattr(mappings, 'target_workspace_hash', None)
+    target_urls = getattr(mappings, 'attachment_urls', None)
     if attachment_mapping:
         case_data['description'] = replace_attachment_hashes_in_text(
-            case_data.get('description', ''), attachment_mapping, target_workspace_hash
+            case_data.get('description', ''), attachment_mapping, target_workspace_hash, target_urls
         )
         case_data['preconditions'] = replace_attachment_hashes_in_text(
-            case_data.get('preconditions', ''), attachment_mapping, target_workspace_hash
+            case_data.get('preconditions', ''), attachment_mapping, target_workspace_hash, target_urls
         )
         case_data['postconditions'] = replace_attachment_hashes_in_text(
-            case_data.get('postconditions', ''), attachment_mapping, target_workspace_hash
+            case_data.get('postconditions', ''), attachment_mapping, target_workspace_hash, target_urls
         )
     
     if 'custom_fields' in case_dict and case_dict['custom_fields']:
@@ -244,7 +243,7 @@ def transform_case_data(
                     if field_id_target:
                         mapped_value = value
                         if isinstance(value, str) and attachment_mapping:
-                            mapped_value = replace_attachment_hashes_in_text(value, attachment_mapping, target_workspace_hash)
+                            mapped_value = replace_attachment_hashes_in_text(value, attachment_mapping, target_workspace_hash, target_urls)
                         case_data['custom_field'][str(field_id_target)] = mapped_value
     elif 'custom_field' in case_dict and case_dict['custom_field']:
         for field_id_source, value in case_dict['custom_field'].items():
@@ -252,7 +251,7 @@ def transform_case_data(
             if field_id_target:
                 mapped_value = value
                 if isinstance(value, str) and attachment_mapping:
-                    mapped_value = replace_attachment_hashes_in_text(value, attachment_mapping, target_workspace_hash)
+                    mapped_value = replace_attachment_hashes_in_text(value, attachment_mapping, target_workspace_hash, target_urls)
                 case_data['custom_field'][str(field_id_target)] = mapped_value
     
     if 'steps' in case_dict and case_dict['steps']:
@@ -282,7 +281,7 @@ def transform_case_data(
             
             # Regular step processing
             if isinstance(step_dict, dict):
-                step_attachments = step_dict.get('attachments', []) or []
+                step_attachments = as_attachment_list(step_dict.get('attachments'))
                 mapped_step_attachments = []
                 if step_attachments and attachment_mapping:
                     for att_item in step_attachments:
@@ -298,11 +297,11 @@ def transform_case_data(
                 step_data = step_dict.get('data')
                 
                 if attachment_mapping:
-                    step_action = replace_attachment_hashes_in_text(step_action, attachment_mapping, target_workspace_hash)
+                    step_action = replace_attachment_hashes_in_text(step_action, attachment_mapping, target_workspace_hash, target_urls)
                     if step_expected_result:
-                        step_expected_result = replace_attachment_hashes_in_text(step_expected_result, attachment_mapping, target_workspace_hash)
+                        step_expected_result = replace_attachment_hashes_in_text(step_expected_result, attachment_mapping, target_workspace_hash, target_urls)
                     if step_data:
-                        step_data = replace_attachment_hashes_in_text(step_data, attachment_mapping, target_workspace_hash)
+                        step_data = replace_attachment_hashes_in_text(step_data, attachment_mapping, target_workspace_hash, target_urls)
                 
                 processed_steps.append({
                     'action': step_action,

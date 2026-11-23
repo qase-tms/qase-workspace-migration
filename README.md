@@ -23,7 +23,7 @@ The source workspace is only read, never modified.
 | Groups | Groups | ✅ Optional | `groups.create`, only when `users.migrate` is true |
 | Custom fields | Custom fields | ✅ | Workspace-global. An existing field of the same title and type is reused |
 | Shared parameters | Shared parameters | ✅ | |
-| Attachments | Attachments | ✅ | References inside text are rewritten to the target's attachments |
+| Attachments | Attachments | ✅ | References inside text are rewritten to the target's attachments. Works with workspaces that have private attachments, as source or target |
 | Milestones | Milestones | ✅ | Hierarchy and due dates |
 | Configurations | Configuration groups and configurations | ✅ | |
 | Environments | Environments | ✅ | |
@@ -443,6 +443,7 @@ What to know about resume:
 | Many more cases in the target than in the source | Unlinked results created cases in the target, see [limitations](#3-known-limitations) | Expected for results of deleted cases. If you do not want them as repository cases, check the target project's settings for creating cases from automated results before migrating |
 | `Custom field ... already exists with a different type` | A field left by an earlier run, or an unrelated field with the same name | Delete it in the target and run again |
 | `N of 20 cases were not created` | The API rejected one case, and with it the batch | The message names the source case ids. Check those cases in the source |
+| `Attachment ... was not migrated: the link led to a Qase sign-in page` | An old public file link in a source workspace with private attachments, and the file is no longer stored under that hash | Check that the file still opens in the source; the case or result keeps its text
 | The run is slow or pauses | Qase rate limiting, or many attachments | Expected. The run backs off and continues. Use `--skip-attachments` for a quick trial |
 | The run waits at `Type yes (exactly)` | `users.create` is on and there are users to create | Type `yes`, or set `users.skip_creation_confirm: true` for an unattended run |
 

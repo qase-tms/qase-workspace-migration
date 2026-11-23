@@ -48,11 +48,24 @@ def _target_project(target_service: Any, code: str) -> Dict[str, Any] | None:
 
 
 def _project_results_total(source_service: Any, code: str) -> int:
-    """Exact number of results in a project, from the API's own total."""
-    from qase.api_client_v1.api.results_api import ResultsApi
+    """
+    Exact number of results in a project, from the API's own total.
 
-    response = ResultsApi(source_service.client).get_results(code=code, limit=1)
-    return int(getattr(response.result, "total", 0) or 0)
+    Raw HTTP, not the SDK: Qase can return a step's attachments as an object,
+    {"1": {...}}, and the SDK then refuses to read the page at all.
+    """
+    from migration import qase_http
+
+    base = source_service.client.configuration.host.rstrip("/")
+    response = qase_http.get(
+        f"{base}/result/{code}",
+        headers={"Token": source_service.api_token, "accept": "application/json"},
+        params={"limit": 1},
+        timeout=30,
+    )
+    response.raise_for_status()
+    result = (response.json() or {}).get("result") or {}
+    return int(result.get("total", 0) or 0)
 
 
 def _count(stats: MigrationStats, entity: str, source_ids: List[Any], already: Dict[Any, Any]) -> None:

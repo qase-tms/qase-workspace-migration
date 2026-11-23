@@ -6,6 +6,38 @@ Notable changes to this migration, newest first. Versions follow
 capability that needs no action from you, and a **patch** means fixes and
 documentation.
 
+## 1.5.1 (2026-11-23)
+
+### Fixed
+- **Attachments migrate from workspaces with private attachments.** In such a
+  workspace every file link is signed and expires after an hour, and attachment
+  details no longer include the file's hash. The migration recognised neither,
+  so it found no attachments at all and every file was silently left behind.
+  Files on cases, steps, results and defects, and images inside text, are now
+  found and copied.
+- **Links inside text open the copied file.** A signed link belongs to the
+  source workspace, so changing the hash inside it could not work. Text now
+  links to the target's own address for each file.
+- **Long runs no longer lose files to expired links.** A link that has expired
+  by the time its file is downloaded is replaced with a fresh one from the
+  source.
+- **Shared steps keep their files, data and working links.** Their text still
+  linked to the source workspace, which broke within the hour for a source
+  with private attachments. Files attached to a shared step, and its data
+  field, were not copied at all.
+- **Result steps no longer show the test case's own files.** When a result had
+  no steps of its own, its steps were built from the case, and the case steps'
+  files came along as if they were evidence from that execution.
+- **Results whose steps share a file with the result are read.** Qase can
+  return such a step's attachments in an unusual shape, which stopped the dry
+  run and the attachment step from reading any result in that project.
+
+### Security
+- The source API token is sent only to the source's own Qase addresses, and
+  never along a redirect. Previously a file download that was refused once
+  retried with the token and let it follow the redirect to the storage
+  provider.
+
 ## 1.5.0 (2026-10-19)
 
 ### Fixed
